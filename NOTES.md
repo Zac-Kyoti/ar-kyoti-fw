@@ -173,9 +173,17 @@ accessor family, not sequencer state. The huge `if/else` structure keyed on that
   `FUN_400a1eea` sequencer tick engine, and finding *how it stays correct* is the whole
   point of this project.
 - One promising unexplored lead: `SequencerStates` (`StaticSingletonI15SequencerStatesE` —
-  a global singleton), found via string search, never yet cross-referenced. Likely owns
-  current/next-pattern playhead state and is a strong candidate for where a pattern-switch
-  commit would live. **Not yet investigated — next session should start here.**
+  a global singleton), found via string search. Likely owns current/next-pattern playhead
+  state and is a strong candidate for where a pattern-switch commit would live.
+- **Checked and it's a dead end**: xrefs to the `PatternSettings::updateMirror` /
+  `Pattern::updateMirror` RTTI strings (`0x400a8a9a`, `0x400a8b50`) land in real code, not
+  static data — but that code turned out to be **C++ static-initialization / type
+  registration** (building a `type_info`-shaped object with the mangled name at program
+  startup: `pea.l <name-string>; jsr FUN_40033100` right after what looks like an
+  `operator new` call), not the methods themselves or anything that runs at pattern-switch
+  time. The actual `Pattern::updateMirror`/`PatternSettings::updateMirror` function bodies
+  are at different, not-yet-found addresses — string-xref search finds their *registration*,
+  not their *code*.
 
 ### Confirmed NOT pursued (per task scope)
 
@@ -187,16 +195,67 @@ accessor family, not sequencer state. The huge `if/else` structure keyed on that
   just its name) is actually understood — the "build DIRECT JUMP from scratch in the OT"
   idea remains explicitly shelved per the task brief.
 
+### Extended Session 1 — ruling out the easy hypotheses  [MEASURED, negative results]
+
+Two follow-up checks, both negative but worth recording so a future session doesn't
+re-walk them:
+
+1. **Not a Ghidra-recognized jump table.** Ghidra's own auto-analysis (`Create Address
+   Tables`, already run) tagged 27 `switchdataD_*` jump tables and dozens of `caseD_*`
+   labels in the image (`tools/ghidra/GhidraListSwitches.java`). Cross-referenced every
+   function `FUN_4003fc14` (the picker-owning dispatcher) calls
+   (`tools/ghidra/GhidraCallees.java`, 66 unique callees) against every function
+   containing a recognized switch table — **zero overlap**. So the PTN CHG mode is not
+   dispatched via a compiler-generated jump table anywhere directly reachable from the UI
+   handler. (Doesn't rule out an if/else compare-chain, which GCC also uses for small
+   switches and which Ghidra doesn't label the same way — just rules out *this specific,
+   mechanically-searchable* pattern.)
+
+2. **Retracted a bad read.** In the extended session, misread `FUN_40137440` (called from
+   `FUN_4003fc14` with `*(param_1+0x80)`, compared against 2 in the earlier decompile
+   excerpt) as a plausible "get current picker value" getter. Raw disassembly shows it's
+   actually a **bit-counting loop** (shift-and-accumulate over 4 bytes, `lsr.l`/`add.l` in
+   a 4-iteration loop) — a generic popcount/bit-tally utility, most likely counting set
+   bits in a per-track enable bitmask (`param_1+0x80` reads like a 16-track bitmask
+   elsewhere in the same function, e.g. `*(uint*)(param_1+0x80) & (1<<n)` patterns).
+   **Unrelated to PTN CHG. Retracted** — flagging this explicitly rather than silently
+   dropping it, per this project's own discipline (and exactly the kind of
+   decompiler-trusting mistake the OT project's Session 70 passes got burned by).
+
+**Honest state of play**: `FUN_4003fc14` is confirmed to be a large (3764-byte), multi-
+feature `PatternSelectionView` event dispatcher handling several unrelated UI concerns
+(PTN CHG picker, per-track bitmask toggling, bank/pattern copy-paste, at least one other
+picker) behind one message-type-keyed dispatch. Its Ghidra decompilation is unreliable
+(known ColdFire limitation) and its raw disassembly is dense enough that continuing to
+manually re-derive semantics instruction-by-instruction has a real misreading risk — seen
+firsthand in the FUN_40137440 retraction above. **Further progress on where the mode is
+*stored* and, especially, where the sequencer *acts* on it needs a different, more
+structural approach than "keep reading FUN_4003fc14 top to bottom."**
+
 ### NEXT (for the next session)
 
-1. Cross-reference `SequencerStates` (find its class layout / methods via its vtable and
-   any `updateMirror`-style callers).
-2. Find where `patternStorage_v5_t` / `patternSettingsStorage_v1_t` fields are read at
-   pattern-switch time — likely search strategy: find `Pattern::updateMirror`'s address
-   (via its RTTI string xref, same technique used for the PTN CHG table), decompile/
-   disassemble it and its callers, and look for the byte/bitfield that gates
-   SEQUENTIAL/DIRECT START/DIRECT JUMP/TEMP JUMP behavior at commit time.
-3. Once that's found: identify what makes it correct on real AR hardware (ordering,
-   locking, what state it's careful to leave consistent) — that is the actual deliverable
-   this whole project exists to produce, per the task brief's step 3.
-4. Do not start on OT adaptation (step 4) before step 3 is solid.
+Top-down from the UI (start at the picker, read forward) has hit diminishing returns —
+`FUN_4003fc14` is a large multi-feature dispatcher with unreliable decompilation, and two
+plausible-looking leads inside it (a jump-table dispatch, `FUN_40137440` as a mode getter)
+were both checked and ruled out this session. A different, more structural approach is
+likely to pay off better next session:
+
+1. **Try bottom-up instead of top-down**: rather than reading forward from the UI picker,
+   look for the *sequencer's* pattern-boundary check directly — by analogy to how the OT
+   project originally found its own per-tick engine (`FUN_400a1eea`), not by re-deriving
+   it from a menu handler. Candidate entry points: the `SequencerStates` singleton's
+   accessor (`getInstance()`-style lazy-init function, findable from its one string xref at
+   `0x4003535e`) and its class layout; or search for the actual `Pattern::updateMirror` /
+   `PatternSettings::updateMirror` **function bodies** (not their RTTI registration sites
+   found this session) via vtable-slot tracing from a `Pattern`/`PatternSettings` instance,
+   since the registration code at `0x400a8a70`+ runs at startup and likely constructs a
+   vtable-bearing object nearby.
+2. Once the pattern-switch commit path is found: identify where it reads the 4-valued mode
+   (SEQUENTIAL/DIRECT START/DIRECT JUMP/TEMP JUMP) and how it stays correct — the ordering/
+   locking/state-consistency invariants are the actual deliverable this project exists to
+   produce (task brief step 3).
+3. Do not start on OT adaptation (step 4) before step 3 is solid.
+4. **Process note**: when the decompiler output looks structurally implausible (bogus
+   stack-var aliasing, calls with no visible args), stop and re-derive from raw
+   disassembly rather than reasoning from the pseudo-C — exactly the trap OT's own Session
+   70 passes 4–14 fell into before pass 15 retracted them.

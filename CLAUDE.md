@@ -18,10 +18,10 @@ enough to inform `~/Documents/octatrack-kyoti-fw`'s own long-stuck DIRECT JUMP e
   `Zac-Kyoti` — check `git config user.email` before every commit, no exceptions. A real
   name/email must never enter this repo's history (the sibling project had to scrub one
   out after an accidental commit).
-- **Hardware revision**: the firmware's own device byte says `0x07` = original Analog Rytm
-  ("MKI"), not `0x0c` (Mk II) — measured from the `.syx` container, not assumed. Still,
-  per the project brief: **get the user's explicit confirmation before anything gets near
-  a real flash.** Nothing here has touched hardware yet.
+- **Hardware = Analog Rytm MKI only. No MKII.** Measured from the `.syx` container's own
+  device byte (`0x07` = original Analog Rytm, not `0x0c` = Mk II) and **explicitly
+  confirmed by the user** (2026-09-19). Nothing here has touched real hardware yet, and
+  nothing should without a fresh explicit go-ahead when that point actually arrives.
 - **Never fabricate or hand-edit firmware bytes.** Everything is read from the real
   `.syx`/extracted `.bin`; nothing is invented.
 - **This is a CPU/sequencer-side question, not DSP/audio.** Don't go looking at the AR's
