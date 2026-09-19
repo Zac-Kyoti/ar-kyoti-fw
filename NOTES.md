@@ -596,10 +596,125 @@ one of them is plausibly a callback pointer for "user confirmed a selection," bu
 resolving that requires mapping the exact pushes at the call site (`~0x40040846`–
 `0x4004088a`) to call-frame slots precisely, which hasn't been done with confidence.
 
+## Session 4 (2026-09-19, continued) — exhausted the picker-construction path; built a
+   stack-argument tool; definitive negative result
+
+### Built `tools/ghidra/GhidraStackArgs.java`  [tool, reusable asset]
+
+Directly acting on Session 3's own recommendation: rather than keep hand-computing stack
+depth through PEA/MOVE/CLR/SUBQ/ADDQ sequences (error-prone — caught myself making a real
+mistake mid-session, see below), wrote a Ghidra script that mechanically walks straight-
+line code from a start address to a target `jsr`, tracks every SP-affecting instruction,
+and reports each pushed item's callee-relative offset. Verified it against the exact
+region that motivated it (`0x40040846`–`0x4004088a`, the call into `FUN_40158ff8`): its
+output matched my hand-trace numbers exactly once a mnemonic-matching bug was fixed (Ghidra
+returns `"move.l"` not `"move"` from `getMnemonicString()` — trivial but would have silently
+under-counted pushes). Confirmed the tool's byte-offset output against
+`FUN_40158ff8`'s own decompiled `in_stack_0000NNNN` labels: **matched exactly after
+accounting for a consistent 1-byte baseline shift** (Ghidra's own labels start counting
+one byte higher than a naive "return-address-at-0" model — not fully explained, but the
+*relative spacing* between all four referenced offsets matched the tool's output perfectly,
+which is what matters for resolving which pushed item is which).
+
+**Near-miss worth recording**: while first trying to verify this by hand with `objdump`,
+mis-converted a virtual address to a file offset (`0x400407EC → 0x407ec`, when it's
+actually `0x403ec` — a digit-transposition error) and got a wildly different, unrelated
+instruction stream back. Briefly suspected radare2's address mapping was fundamentally
+broken (it has been printing an unexplained `"using oba to load the syminfo from different
+mapaddress"` warning on every single invocation since Session 1). Cross-checked against
+Ghidra's own listing at the *correct* offset and confirmed r2 and Ghidra agree — the
+warning is apparently benign for this workflow, and the discrepancy was entirely a self-
+inflicted arithmetic error. **Lesson, not yet acted on**: always double-check VA↔file-
+offset arithmetic against Ghidra's listing (which is base-aware) before trusting a raw
+`objdump -b binary` call, and stop treating r2's `oba` warning as evidence of anything
+without a specific reason to.
+
+**Separately confirmed (genuine, minor)**: radare2's plain `m68k` disassembly mode
+mis-decodes ColdFire's `muls.l`/`mulu.l` 32×32 instruction (`0x4c04 1800` at
+`0x40040830`, shown as `invalid` by r2, correctly `muls.l D4,D1` in both Ghidra's listing
+and `m68k-elf-objdump -m m68k:isa-a:mac`) — this is the exact same ColdFire decode
+limitation the OT project already documented in its own notes. Didn't feed into any
+conclusion drawn before being caught. **Going forward: treat Ghidra's own listing (or
+`m68k-elf-objdump -m m68k:isa-a:mac`) as ground truth over r2's plain-m68k disassembly
+for any ColdFire 32×32 multiply.**
+
+### Definitive result: the entire PTN CHG picker-construction path is generic UI chrome
+   [MEASURED — strong negative result]
+
+Using the new tool, precisely resolved what `FUN_40158ff8` receives from its caller
+(4 extra stack args beyond its own `param_1`) and traced every one of them through to its
+actual use:
+
+- The computed pointer into the fixed global `0x416c5050`-based array (indexed by
+  `FUN_400b3db2`'s SOUND_SETTINGS-derived result × a `muls.l`-computed stride, then
+  clamped) → passed all the way down into **`PopupWindow::PopupWindow()`**
+  (`FUN_40074c4c`, confirmed via its own `s_PopupWindow` tag string) → stored at
+  `PopupWindow + 0x98`.
+- Chased that stored field to its one real consumer, `FUN_400748a8` — a **rendering/
+  layout function** (pixel-geometry math, calls to what are clearly draw-box/draw-text
+  primitives). `PopupWindow+0x98` is read there as `*(*(this+0x98)+4)+4` and passed to a
+  text-drawing call — **it's the popup's title-bar string, not a write target.** The
+  `0x416c5050` array is a small table of pre-formatted dialog titles (or similar display
+  strings), and the SOUND_SETTINGS-derived value just happens to select which cosmetic
+  title variant to show — completely unrelated to any pattern data.
+- The other three passed args resolved to: a pointer into the just-`memcpy`'d copy of the
+  PTN CHG string table (one specific string within it), a constant zero flag byte, and the
+  literal `3` (max index for the 4-item list) — all picker-display bookkeeping.
+- `FUN_40158ff8` itself: allocates a 176-byte ref-counted wrapper, forwards to
+  `FUN_40074f22` → `FUN_40074c4c` (`PopupWindow`'s real constructor). No write anywhere.
+- `FUN_40076d18` (called right after, on the newly-created popup): generic guarded
+  dispatch/notify with standard ref-count bookkeeping. No write.
+- The type-erased closure vtable at `0x4019a910` found earlier: confirmed its slot 2 is a
+  double-indirect call thunk (`(**(this+0xc))()`), the standard shape of a `std::function`-
+  style invoker — meaning the picker's actual value-changed/confirm handler, if wired
+  through this object at all, is a runtime-bound closure whose concrete implementation
+  isn't visible via this vtable — it would need to be found at the point the specific
+  closure gets *allocated*, which this trace never reached.
+
+**Conclusion**: every single instruction from the PTN CHG string-table population
+(`0x400407ec`) through the popup's full construction and title rendering has now been
+traced, and **none of it writes a pattern-settings value anywhere.** This is a strong,
+well-supported negative result — not "still not found," but "conclusively not in this
+code path." Whatever commits the user's PTN CHG selection lives entirely outside the
+picker-construction sequence examined across Sessions 2–4.
+
 ### NEXT (for the next session)
 
-Manual disassembly reading of this one 3764-byte dispatcher function has now cost three
-sessions, produced two corrected false leads (Session 2's `FUN_400b3db2`, this session's
+The picker-construction lead is exhausted — don't re-enter it. Two directions remain:
+
+1. **Find the generic "popup confirmed" handler.** This codebase's popup/dialog framework
+   looks like a shared, reusable "modal stack" pattern (`PopupWindow` is clearly a common
+   base class with ~22 virtual methods, used for many different dialogs across the UI, not
+   just this one). There is very likely ONE shared handler for "OK/SELECT pressed while a
+   popup is active" that reads back the popup's current selection and a stored
+   *descriptor* (not the closure this session went looking for) to decide where to write
+   it. Search for functions that read from a global "active popup" pointer/stack, or that
+   call through `PopupWindow`'s own vtable slots not yet examined (own 22 slots dumped
+   this session at `0x401a53ac`; only slot 4 —`FUN_400748a8`, rendering— was actually
+   opened. The others are unexamined and are the natural next target, especially anything
+   that looks like an input/confirm handler rather than layout/drawing.)
+2. **Go bottom-up from the sequencer instead of top-down from any UI code.** Three
+   sessions of tracing UI construction code (table population, pickers, popups) have
+   produced a detailed map of this codebase's generic C++ framework but zero hits on
+   PTN CHG's actual storage or the sequencer's read of it. The OT project's own working
+   method for finding ITS per-tick engine was not to start from a menu handler either.
+   Consider searching for whatever in this AR firmware plays the equivalent role to the
+   OT's `FUN_400a1eea` — e.g. by finding the audio/MIDI clock tick's own ISR or a
+   `SequencerStates`-adjacent method not yet examined (Session 3 found its constructor and
+   ruled out its 4 vtables as destructor-only; its *non-virtual* methods were never
+   looked at).
+3. Whichever path is chosen, keep using `GhidraStackArgs.java`/`GhidraFindFieldUse.java`
+   over hand-tracing wherever a call site's argument layout matters — this session showed
+   both that hand-tracing is genuinely error-prone here and that the tooled approach
+   resolves it cleanly.
+4. Do not start on OT adaptation (task step 4) — four sessions in, still correctly not
+   close enough to step 3 being solid. This is tracking (not exceeding) the scale the task
+   brief itself predicted.
+
+### Old, now-superseded NEXT (for reference, from Session 3 continued)
+
+Three sessions of manual disassembly on this one dispatcher function have produced two
+corrected false leads (Session 2's `FUN_400b3db2`, this session's
 implicit trust that `+0x74`-adjacent code was PTN-CHG-specific), and one real (if
 ultimately-cleared) methodology hazard (the `a2` reassignment). That is a strong signal to
 change approach rather than keep pushing the same technique further:
