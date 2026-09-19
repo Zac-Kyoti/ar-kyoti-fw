@@ -901,19 +901,57 @@ playing* (the actual DIRECT JUMP use case), which may be a still-undiscovered fu
 possibly closer to `case 0xc`'s sibling cases in `switchD_400a1e5e` that weren't
 individually decompiled this session.
 
+### Read through `switchD_400a1e5e`'s other cases; checked `FUN_400b3980`  [MEASURED]
+
+Re-examined the full `switchD_400a1e5e` decompile (already captured earlier this session)
+case by case, looking specifically for one reachable while already playing (the actual
+DIRECT JUMP scenario) rather than `TransportView`'s PLAY/STOP path. Nothing among the ~38
+cases obviously matches — most are kit/sound-parameter events (`0xe`–`0x15`, all sharing
+the shape `FUN_40157fb8(); FUN_4009fXXX();`), sample/file linked-list traversal
+(`0x16`–`0x19`, `0x1f`), MIDI clock/tempo-sync bookkeeping (the `0x21`/`code_r0x400a219c`
+loop), or generic notify dispatch (`0xb`, `0x1d`). One near-miss: **`case 0x25`** branches
+on a value at `*(unaff_A2+4)` against `0`, `3`, and `4` specifically (not a contiguous
+0–3 PTN-CHG-shaped range) calling into an unrelated `0x400f3xxx` address cluster — checked
+and set aside as a different feature (not decompiled further; the non-contiguous case
+values are enough to rule it out as PTN CHG's own enum).
+
+Checked **`FUN_400b3980`** (called by cases `0x1a`/`0x1b`, both of which also call the
+`FUN_400352d4` tristate poller found earlier): it's the **tempo setter** — clamps an
+input to `0xe0f`–`0x8ca1` (a BPM×10-scaled range, ~36–360 BPM), writes it through the
+generic `getMirror()`/`notify()` pattern. Cases `0x1a`/`0x1b` are tempo-encoder turn
+handling, unrelated to PTN CHG.
+
+**This closes out every concrete lead surfaced by this session's bottom-up push.**
+Genuinely major structural progress was made (the tick engine, its ISR registration, the
+pattern-select request path, the transport handler, tempo handling, song/chain-mode
+plumbing) — but the PTN CHG mode check itself was not found among any of it. The one
+important caveat for whoever continues: the "exhaustive" field-offset check of
+`FUN_4009905c` (four `0x14eXX` literals) only catches *literal* immediate offsets — a
+field reached through a computed/indirect offset (e.g. a small lookup table keyed by
+track or event type) would not have shown up in that grep, and hasn't been ruled out.
+
 ### NEXT for this thread (highest priority)
 
-1. **Read `switchD_400a1e5e`'s other ~38 cases** (the function containing `case 0xc`,
-   1828-byte body, already fully decompiled once this session — see the Session 5 "traced
-   the pattern-select request" entry above for the full listing). Only `case 0xc` has been
-   understood in detail so far. Look specifically for a case that's reachable **while
-   already playing** (as opposed to `TransportView`'s PLAY/STOP handling, now ruled out) —
-   that's the actual DIRECT JUMP use case (switching patterns *during* playback), and it's
-   the one scenario this session hasn't yet targeted directly.
-2. `FUN_40097724`, `FUN_40097c00`, `FUN_40097c18`, `FUN_400976f6` — four more members of
-   the `0x4009xxxx` module cluster, referenced from `FUN_4009905c`/`FUN_40098226`, still
-   not individually decompiled.
-3. If a mode-check is found, confirm it reads from the flattened `0x40b6a620 +
+Every concrete lead this session's bottom-up push surfaced organically has now been
+checked (see immediately above). Continuing needs either fresh leads or better tooling,
+not more ad-hoc decompiling of whatever function was mentioned last:
+
+1. **Build the offset-scanning tool flagged as a caveat above**, rather than continue by
+   hand: a script that, for a given function, lists every memory access whose base is
+   `DAT_40566754`/`0x40b6a620` (the flattened pattern table) *including* computed/indirect
+   ones (register-plus-register addressing, not just literal immediates) — this is the
+   concrete gap that let the `FUN_4009905c` field check quietly miss anything reached
+   through a lookup table rather than a fixed offset.
+2. `FUN_40097724`, `FUN_40097c00`, `FUN_40097c18`, `FUN_400976f6` — four members of the
+   `0x4009xxxx` module cluster referenced from `FUN_4009905c`/`FUN_40098226`, still not
+   individually decompiled. Lower priority than (1) since the pattern so far is "more
+   transport/reset plumbing," but not yet ruled out.
+3. Consider whether PTN CHG's mode might not be consulted by *this* engine at all during
+   normal playback, but only at the moment a pattern change is *requested* — i.e. back in
+   `case 0xc`'s own body (already read once, but worth a second, more careful pass now
+   that the surrounding architecture is much better understood) or in whatever validates
+   the pattern-index byte before calling `FUN_40098880`.
+4. If a mode-check is found, confirm it reads from the flattened `0x40b6a620 +
    pattern_index*0x14f00`-based table (not the C++ object model) — if so, the PTN CHG mode
    byte's offset within that 0x14f00-byte record is the concrete target, and the earlier
    Sessions 3–4 C++-side search (`PatternSettings`, `patternSettingsStorage_v1_t`) was
@@ -921,13 +959,8 @@ individually decompiled this session.
    engine's own compiled/runtime copy) — worth an explicit note for whoever continues,
    since it reframes three sessions of C++-side searching as not wrong, just aimed at a
    different (also real, just not engine-facing) layer of the same data.
-4. This remains the most promising lead of the whole project so far — prioritize it over
-   resuming the UI-side `PopupWindow` confirm-flag thread. But if this specific cluster of
-   functions is fully exhausted without a hit, the next escalation is tooling rather than
-   more manual function-by-function decompiling: e.g. a script that scans every function
-   touching `0x4056673a`–`0x40566900`-ish (the whole per-track/global state block, not just
-   the two addresses checked so far) for a compare against `0`..`3`, surfacing candidates
-   mechanically instead of one xref search at a time.
+5. This remains the most promising lead of the whole project so far — prioritize it over
+   resuming the UI-side `PopupWindow` confirm-flag thread.
 
 ### NEXT (superseded UI-side thread, kept for reference — lower priority now)
 
