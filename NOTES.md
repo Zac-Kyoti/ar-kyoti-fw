@@ -576,6 +576,26 @@ in the same dispatcher (around `0x40040058`). Two separate, unrelated cases both
 a generic, frequently-reused utility field — not something specific to whichever case
 happens to also be building the PTN CHG picker.
 
+### `FUN_40158ff8`/`FUN_40076d18` checked — both generic, no commit logic  [MEASURED]
+
+- `FUN_40158ff8`: allocates a 176-byte (`0xb0`) reference-counted wrapper object
+  (`refcount fields = 1,1`, vtable `&PTR_FUN_4019a910`), forwards four of its own
+  incoming stack args into `FUN_40074f22`. This is a generic "wrap this array + bounds
+  into a ref-counted picker-options object" constructor — no application-specific write
+  happens inside it.
+- `FUN_40076d18`: guards on `*(this+0x2c)` being non-NULL, then calls
+  `FUN_40077af6(*(this+0x2c), &local, param_3)` and does standard ref-count
+  increment/decrement/release bookkeeping around it. Also generic dispatch/notify
+  plumbing (same shape recurs constantly throughout this codebase's C++ framework),
+  not a value setter.
+
+Neither writes anything resembling a PTN CHG mode value. The four stack-passed arguments
+`FUN_40158ff8` receives (labeled `in_stack_00000014/18/1c/20` in its decompile, since
+they're the caller's pushed values) are the last unexamined piece of this specific trace —
+one of them is plausibly a callback pointer for "user confirmed a selection," but
+resolving that requires mapping the exact pushes at the call site (`~0x40040846`–
+`0x4004088a`) to call-frame slots precisely, which hasn't been done with confidence.
+
 ### NEXT (for the next session)
 
 Manual disassembly reading of this one 3764-byte dispatcher function has now cost three
@@ -584,10 +604,9 @@ implicit trust that `+0x74`-adjacent code was PTN-CHG-specific), and one real (i
 ultimately-cleared) methodology hazard (the `a2` reassignment). That is a strong signal to
 change approach rather than keep pushing the same technique further:
 
-1. **Decompile/examine `FUN_40158ff8` and `FUN_40076d18`** (the list-picker
-   constructor and its "bind to current pattern" call, found at the very end of this
-   session's trace) — these are the two most likely places left to find an explicit
-   "write the user's selection back to storage" step, and neither has been looked at yet.
+1. Map the exact call-site arguments at `~0x40040846`–`0x4004088a` (what actually gets
+   pushed for `FUN_40158ff8`'s 4 extra stack params) to check for a callback pointer —
+   the one specific thread left dangling from this session's trace.
 2. If that doesn't resolve it: build a small **tool** rather than keep reading disassembly
    by eye — e.g. a script that, given a function's disassembly, tracks which register holds
    the canonical `this` pointer across the whole function (flagging every `lea.l N(aX),aX`
