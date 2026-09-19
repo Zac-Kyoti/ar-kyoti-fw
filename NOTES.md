@@ -706,7 +706,79 @@ later pass (its own tick/update, or the next time the same dispatcher runs) and 
 reads the popup's selection and commits it — a common older-style modal-dialog pattern.
 That reader is still unlocated.
 
-### NEXT (for the next session)
+## Session 5 (2026-09-19, continued) — MAJOR: found the per-tick sequencer engine
+
+Abandoned the UI-construction thread per the strategic pivot flagged above and went
+bottom-up instead: decompiled `SequencerStates::SequencerStates()`'s full body (only the
+vtable-install prefix had been read before) and found three non-virtual, `SequencerStates`-
+specific setup calls at its end (`FUN_400352d4`, `FUN_40035224`, `FUN_40035282`), all
+sharing one shape — "query some raw global state, compare against a cached field, update +
+notify-on-change if different." Decompiled what they query:
+
+- `FUN_40035224` loops over **13 tracks** calling `FUN_4009878a(track_index)`, caching each
+  result into `SequencerStates+0x48`. `FUN_4009878a` itself just indexes a **raw global
+  byte array `(byte*)0x4056673a[track_index]`** (bounds-checked to 13) — a live,
+  ISR-adjacent state table completely outside the C++ Value/Mirror framework this whole
+  investigation had been swimming in until now.
+- `FUN_400987be` similarly reads a lone global `_DAT_4056676c` (in the same `0x4056xxxx`
+  block, 0x32 bytes from the array above).
+- `FUN_4009c460` computes `0x1f - LZCOUNT(DAT_4024be38)` — a bitmask→index decode, in a
+  *different* memory region (`0x4024xxxx`), used elsewhere for playback-state (stopped/
+  playing/recording) checks.
+
+**Found the writers of `0x4056673a`** (`GhidraXrefsTo.java`): a tight cluster of 8
+functions all in the `0x4009xxxx` range — a self-contained module distinct from everything
+examined in Sessions 1–4. One of them, **`FUN_4009905c`, writes it from 4 separate sites**
+— decompiled it (3958 bytes, by far the largest function decompiled cleanly this whole
+project) and it is unmistakably **the AR's per-tick sequencer engine**:
+
+- Opens by clearing an interrupt-pending bit in ColdFire on-chip peripheral space:
+  `_DAT_fc048010 = _DAT_fc048010 & 0xfdffffff;` — confirms this runs in tick/ISR context.
+- Maintains `DAT_40566754`/`DAT_40566755`/`DAT_40566756` as **current / pending-next /
+  previous pattern index** — e.g. `if (DAT_40566754 != DAT_40566755) { FUN_40001236(...) }`
+  (notify on a real pattern change) followed later by the literal commit
+  `DAT_40566754 = DAT_40566755;`.
+- Indexes a **separate, flattened, real-time pattern-data table** at
+  `0x40b6a620 + pattern_index * 0x14f00` — a completely different, much larger
+  (85,760-byte) per-pattern representation than the C++ `Pattern` object (1468 bytes) this
+  project has been tracing since Session 3. This is presumably a "compiled"/performance
+  representation the engine reads directly, separate from the editable project-data model.
+- Has a clear two-phase pattern-change shape: a step-counter reaches a **look-ahead
+  trigger** (`DAT_405666e6 == '\x02'`, i.e. 2 steps before pattern end) → calls
+  `FUN_40097e84()` to compute the actual next pattern into `DAT_40566755`, and
+  `FUN_40097c2c(DAT_40566755)` — then, when the step counter actually reaches the pattern
+  boundary (`DAT_405666e6 == '\0'`), commits: `DAT_40566754 = DAT_40566755` plus a cluster
+  of position/reset bookkeeping. **This two-phase precompute-then-commit shape is exactly
+  where a PTN CHG mode check would plausibly live** — SEQUENTIAL waits for the boundary
+  (what's shown here), while DIRECT START/DIRECT JUMP would need to take a *different*
+  branch that doesn't wait.
+
+**Not yet found**: the actual mode check itself. Everything decompiled so far shows the
+SEQUENTIAL-shaped wait-for-boundary path; no branch keyed on a 4-valued PTN CHG mode field
+has been identified yet inside this function or its neighbors.
+
+### NEXT for this thread (highest priority)
+
+1. **Decompile `FUN_40097e84`** (computes the pending next-pattern value stored into
+   `DAT_40566755`) and `FUN_40097c2c` (called right after, with that value) — these are
+   the most direct candidates for where a PTN CHG mode check would gate *immediate* vs
+   *deferred* pattern switching.
+2. Also worth checking: `FUN_40097724`, `FUN_40097c00`, `FUN_40097c18`, `FUN_400976f6`,
+   `FUN_40098226`, `FUN_4009867a`, `FUN_4009a3e2` — the other members of this same
+   `0x4009xxxx` module cluster, several already known (from the xref search) to also touch
+   `0x4056673a`/`0x4056676c`.
+3. If a mode-check is found, confirm it reads from the flattened `0x40b6a620 +
+   pattern_index*0x14f00`-based table (not the C++ object model) — if so, the PTN CHG mode
+   byte's offset within that 0x14f00-byte record is the concrete target, and the earlier
+   Sessions 3–4 C++-side search (`PatternSettings`, `patternSettingsStorage_v1_t`) was
+   looking in the wrong representation entirely (the editable project model, not the
+   engine's own compiled/runtime copy) — worth an explicit note for whoever continues,
+   since it reframes three sessions of C++-side searching as not wrong, just aimed at a
+   different (also real, just not engine-facing) layer of the same data.
+4. This is the most promising lead of the whole project so far — prioritize it over
+   resuming the UI-side `PopupWindow` confirm-flag thread.
+
+### NEXT (superseded UI-side thread, kept for reference — lower priority now)
 
 The picker-construction lead is exhausted — don't re-enter it. Two directions remain:
 
