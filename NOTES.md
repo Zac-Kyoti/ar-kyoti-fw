@@ -807,6 +807,30 @@ Session 5 `FUN_4009905c` decompile excerpt (e.g. `*(char*)(iVar7+0x14eb9)`,
 `*(short*)(iVar7+0x14eb3)`, `*(char*)(iVar7+0x354)`) but none has yet been confirmed as a
 4-valued PTN CHG mode specifically — this needs closer reading, not another new lead.
 
+### Checked one flattened-table field via raw listing — boolean, not the mode  [MEASURED]
+
+Per the process note from Session 4 (don't re-read dense decompiled C by eye when the raw
+listing is cleaner), pulled Ghidra's raw instruction listing for the precompute-boundary
+region (`0x40099500`–`0x400996c0`). Found a clean, unambiguous field test:
+
+```asm
+; A2 = (flag<0 ? DAT_40566756 : DAT_40566754) * 0x14f00 + 0x40b6a620   -- selects
+;      previous-pattern's or current-pattern's flat record based on a context byte
+mvs.b  (0x0,A2,D1*0x1), D1     ; D1 = sign-extend *(A2 + 0x14eb9)   [D1 was #0x14eb9]
+cmp.l  D1, D7                  ; D7 = 1
+bne.b  0x40099564              ; if field != 1: D1 = DAT_40566774 (a global default)
+                                ; if field == 1 (fallthrough): D1 = *(context_struct - 0x52)
+```
+
+Field `pattern_record + 0x14eb9` is tested against the literal `1`, not a 4-way range —
+**this reads as a per-pattern boolean flag, not the 4-valued PTN CHG mode.** Plausibly
+something like "override step-length from context" or similar. Ruling it out as the PTN
+CHG field specifically, but recording the exact test shape here since it's now a template
+for checking the *other* nearby field offsets (`0x14eb3`, `0x14eb5`, `0x354`, and whatever
+else appears in this same record) the same mechanical way — via raw listing, not
+decompiled C, and looking specifically for a compare against a small range (0–3) or a
+4-entry jump table rather than a single-bit test.
+
 ### NEXT for this thread (highest priority)
 
 1. **Closely re-read `FUN_4009905c`'s own precompute/commit boundary logic** — the big

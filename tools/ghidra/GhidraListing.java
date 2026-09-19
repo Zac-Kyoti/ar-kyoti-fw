@@ -9,8 +9,8 @@ public class GhidraListing extends GhidraScript {
     public void run() throws Exception {
         var af = currentProgram.getAddressFactory().getDefaultAddressSpace();
         var lst = currentProgram.getListing();
-        long start = 0x400407e0L;
-        long end = 0x40040900L;
+        long start = 0x40099500L;
+        long end = 0x400996c0L;
         Instruction ins = lst.getInstructionAt(af.getAddress(start));
         if (ins == null) {
             ins = lst.getInstructionContaining(af.getAddress(start));
