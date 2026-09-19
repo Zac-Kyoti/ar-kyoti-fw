@@ -678,21 +678,52 @@ well-supported negative result — not "still not found," but "conclusively not 
 code path." Whatever commits the user's PTN CHG selection lives entirely outside the
 picker-construction sequence examined across Sessions 2–4.
 
+### Found `PopupWindow`'s confirm signal — but not the write-back  [MEASURED]
+
+Went back into `PopupWindow`'s own vtable (dumped earlier this session, 22 slots at
+`0x401a53ac`) looking for something more than layout/rendering code. Found it:
+
+- **`FUN_4007502c` (vtable slot 2) is `PopupWindow`'s generic event handler.** On event
+  type `0x45` (from the same `FUN_40070698`/`FUN_4007072c` event-field-accessor family
+  seen throughout this codebase since Session 2 — plausibly "OK/SELECT pressed", not yet
+  independently confirmed), with two guard bit-tests passing, it calls through **the
+  object's own vtable slot `0x2c`** — i.e. `(*this->vtable)[0x2c](this)`.
+- **Slot `0x2c` resolves to `FUN_40076cb8`**, which does: if not already confirmed
+  (checked via `FUN_40076c94`, a small linear-scan helper), set `*(this+0x30) = 1` — **a
+  "confirmed" flag** — and if `*(this+0x2c) != 0` (a stored value, set by a *different*
+  function, `FUN_40076ea0`, seen earlier this session doing `*(this+0x2c) = param_2` when
+  called), call `FUN_40077744(this)`.
+- **`FUN_40077744` turns out to just be `*(this+0x22) = 1`** — a plain flag set (most
+  likely "needs redraw"/"dirty"), not a value write. Dead end for finding the commit
+  itself, but confirms `+0x30` really is a distinct "user confirmed" signal separate from
+  whatever `+0x2c` holds.
+
+**So: pressing OK on this popup sets a "confirmed" flag on the popup object, but nothing
+found so far in this trace actually reads back the user's selection and writes it
+anywhere.** The likely mechanism, based on this shape (a "confirmed" flag rather than a
+synchronous callback firing on button-press): the popup's **owner** polls `+0x30` on a
+later pass (its own tick/update, or the next time the same dispatcher runs) and only then
+reads the popup's selection and commits it — a common older-style modal-dialog pattern.
+That reader is still unlocated.
+
 ### NEXT (for the next session)
 
 The picker-construction lead is exhausted — don't re-enter it. Two directions remain:
 
-1. **Find the generic "popup confirmed" handler.** This codebase's popup/dialog framework
-   looks like a shared, reusable "modal stack" pattern (`PopupWindow` is clearly a common
-   base class with ~22 virtual methods, used for many different dialogs across the UI, not
-   just this one). There is very likely ONE shared handler for "OK/SELECT pressed while a
-   popup is active" that reads back the popup's current selection and a stored
-   *descriptor* (not the closure this session went looking for) to decide where to write
-   it. Search for functions that read from a global "active popup" pointer/stack, or that
-   call through `PopupWindow`'s own vtable slots not yet examined (own 22 slots dumped
-   this session at `0x401a53ac`; only slot 4 —`FUN_400748a8`, rendering— was actually
-   opened. The others are unexamined and are the natural next target, especially anything
-   that looks like an input/confirm handler rather than layout/drawing.)
+1. **Find who reads `PopupWindow+0x30` (the "confirmed" flag, `FUN_40076cb8` sets it to 1
+   on event `0x45`).** That reader is the code that performs the actual write-back — this
+   is now a precise, concrete target rather than a vague "find the confirm handler."
+   Likely candidates: the popup's owner polling it on a subsequent tick, or a shared
+   "modal dialog pump" function called once per UI frame that checks every active popup's
+   `+0x30`. `PopupWindow`'s remaining vtable slots (7 of 22 examined so far: slots 0,1,2,3,
+   4 decompiled this session, i.e. `0x4015948c`/`0x40159544`/`0x4007502c`/`0x40076a90`/
+   `0x400748a8`, plus slots 0xb/`0x40076cb8` and its callees) are a reasonable place to
+   keep looking, but a global search for readers of a fixed offset `+0x30` relative to
+   *any* pointer isn't directly mechanizable the way the `+0x2c` field-use search was —
+   consider whether `GhidraFindFieldUse.java` can be pointed at a broader candidate list
+   (e.g. every function calling into this object, found via the `PatternSelectionView`
+   constructor's own later code, since `PatternSelectionView` is presumably the one that
+   created this exact popup and is the natural owner to poll it).
 2. **Go bottom-up from the sequencer instead of top-down from any UI code.** Three
    sessions of tracing UI construction code (table population, pickers, popups) have
    produced a detailed map of this codebase's generic C++ framework but zero hits on
