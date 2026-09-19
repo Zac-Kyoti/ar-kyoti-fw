@@ -757,17 +757,79 @@ project) and it is unmistakably **the AR's per-tick sequencer engine**:
 SEQUENTIAL-shaped wait-for-boundary path; no branch keyed on a 4-valued PTN CHG mode field
 has been identified yet inside this function or its neighbors.
 
+### Traced the pattern-select request all the way to a real switch dispatcher  [MEASURED]
+
+`FUN_40097e84`/`FUN_40097c2c` (the two functions `FUN_4009905c` calls at its "precompute"
+point) turned out to be **SONG/CHAIN-mode** logic (a distinct AR feature — patterns
+auto-advancing in a programmed chain), not PTN CHG — `FUN_40097c2c` sends a MIDI-out
+message (`thunk_FUN_40083978(2, ...)`, a 2-byte MIDI call, plausibly Program Change) when
+the chain's next pattern differs from the last one sent. Real, useful sequencer knowledge,
+but a different feature. Retracting it as the PTN CHG lead specifically.
+
+That prompted a cleaner hypothesis: search for whoever **writes** `DAT_40566754`
+(current pattern) and `DAT_40566755` (pending pattern) *from outside* `FUN_4009905c`
+itself — that's the UI-facing "request a pattern change" entry point.
+
+- **`FUN_40097fee`** turned out to be **boot-time init**, not a runtime request handler —
+  but it's a great confirmation: `_DAT_400001e4 = FUN_4009905c;` installs `FUN_4009905c`
+  as an **interrupt vector**, alongside ColdFire interrupt-controller config writes
+  (`DAT_fc04806c`, `DAT_fc048079`, `DAT_fc04c07e`) — conclusively confirms it's the tick
+  ISR, not just "some function that happens to touch these globals."
+- **`FUN_40098880(param_1)`** is the real one: `if (param_1 < 0x80) { DAT_40566755 =
+  param_1; _DAT_40566760 = 0; _DAT_40566764 = -1; }` — a clean "request pattern `param_1`
+  (0–127, matches the known pattern count)" function that only ever touches the **pending**
+  slot, never the current one directly.
+- **`FUN_40098880` has exactly one caller in the whole binary**: `case 0xc` inside a real
+  switch statement, `switchD_400a1e5e`, at function `0x400a219c` (1828-byte body). Ghidra's
+  own switch-table recognition worked here (unlike `FUN_4003fc14`'s if/else chain) — this
+  is a **completely different, much lower-level dispatcher** than `PatternSelectionView`'s
+  UI handler: cases cover transport, MIDI clock, and other core-sequencer messages, not
+  view-specific UI concerns. `case 0xc`'s body checks a message subtype
+  (`FUN_40072590() == 5`) and a validated pattern-index byte field before calling
+  `FUN_40098880`.
+
+**Notable structural correlation with the OT project**: this dispatcher's address,
+`0x400a1e5e`, is startlingly close to the OT firmware's own long-studied core sequencer
+function, `FUN_400a1eea` (OT NOTES.md, referenced throughout this task's own brief) — only
+~0x8c (140) bytes apart. Both firmwares share the DPS-1-style platform hypothesis from
+Session 1; this is the first concrete *address-level* echo of that shared heritage found
+in this project, and a genuinely promising sign for task step 4 (once step 3 is solid):
+if these two functions really are cognate, whatever invariant the AR maintains here may
+map close to 1:1 onto where the OT's own patches have been landing.
+
+**Still not found**: an explicit branch keyed on the 4-valued PTN CHG mode anywhere in
+this chain. `case 0xc`'s only visible branching is the subtype/range check, not a mode
+check. The remaining hypothesis: the mode is read *inside* `FUN_4009905c`'s own
+precompute/commit boundary logic (the large boolean expression gating early triggering at
+step `0x02`), reading a field from the flattened per-pattern table at
+`pattern_index*0x14f00 + 0x40b6a620` — several such field reads are already visible in the
+Session 5 `FUN_4009905c` decompile excerpt (e.g. `*(char*)(iVar7+0x14eb9)`,
+`*(short*)(iVar7+0x14eb3)`, `*(char*)(iVar7+0x354)`) but none has yet been confirmed as a
+4-valued PTN CHG mode specifically — this needs closer reading, not another new lead.
+
 ### NEXT for this thread (highest priority)
 
-1. **Decompile `FUN_40097e84`** (computes the pending next-pattern value stored into
-   `DAT_40566755`) and `FUN_40097c2c` (called right after, with that value) — these are
-   the most direct candidates for where a PTN CHG mode check would gate *immediate* vs
-   *deferred* pattern switching.
+1. **Closely re-read `FUN_4009905c`'s own precompute/commit boundary logic** — the big
+   boolean expression gating the `DAT_405666e6 == '\x02'` early-trigger branch, and the
+   handful of `*(char/short*)(iVar7 + 0x14eXX)` field reads already visible in the Session
+   5 decompile excerpt (`0x14eb9`, `0x14eb3`, `0x14eb5`, `0x354`, and others not yet
+   individually identified). One of these fields — or one not yet spotted in the same
+   function — is the best remaining candidate for where PTN CHG's 4-valued mode is read.
+   Since hand-reading a 3958-byte decompile is exactly the kind of task Session 4 already
+   showed is error-prone, consider a scripted approach: dump every distinct
+   `iVar7 + 0x14eXX`-style offset referenced in this function with its usage context
+   (compared-against value, branch shape) rather than re-reading the wall of C by eye.
 2. Also worth checking: `FUN_40097724`, `FUN_40097c00`, `FUN_40097c18`, `FUN_400976f6`,
    `FUN_40098226`, `FUN_4009867a`, `FUN_4009a3e2` — the other members of this same
    `0x4009xxxx` module cluster, several already known (from the xref search) to also touch
    `0x4056673a`/`0x4056676c`.
-3. If a mode-check is found, confirm it reads from the flattened `0x40b6a620 +
+3. Also worth a look: `switchD_400a1e5e`'s other cases (the containing function of `case
+   0xc`) — a full 1828-byte switch covering many transport/sequencer message types. Not
+   fully read this session beyond confirming `case 0xc` is the pattern-select request path;
+   another case may be the "apply immediately" counterpart if the two-path hypothesis
+   (deferred via `DAT_40566755` vs immediate via a direct `DAT_40566754` write) turns out
+   to be real rather than something the tick engine alone handles.
+4. If a mode-check is found, confirm it reads from the flattened `0x40b6a620 +
    pattern_index*0x14f00`-based table (not the C++ object model) — if so, the PTN CHG mode
    byte's offset within that 0x14f00-byte record is the concrete target, and the earlier
    Sessions 3–4 C++-side search (`PatternSettings`, `patternSettingsStorage_v1_t`) was
@@ -775,7 +837,7 @@ has been identified yet inside this function or its neighbors.
    engine's own compiled/runtime copy) — worth an explicit note for whoever continues,
    since it reframes three sessions of C++-side searching as not wrong, just aimed at a
    different (also real, just not engine-facing) layer of the same data.
-4. This is the most promising lead of the whole project so far — prioritize it over
+5. This is the most promising lead of the whole project so far — prioritize it over
    resuming the UI-side `PopupWindow` confirm-flag thread.
 
 ### NEXT (superseded UI-side thread, kept for reference — lower priority now)
