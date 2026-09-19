@@ -831,29 +831,89 @@ else appears in this same record) the same mechanical way — via raw listing, n
 decompiled C, and looking specifically for a compare against a small range (0–3) or a
 4-entry jump table rather than a single-bit test.
 
+### Exhaustively checked all pattern-record fields FUN_4009905c touches — none is it
+   [MEASURED — strong negative result]
+
+Extracted `FUN_4009905c`'s full raw instruction listing (1107 instructions) and
+mechanically grepped for every distinct offset into the flattened per-pattern record
+(base `0x40b6a620`, stride `0x14f00`) the function references. **Only four exist**:
+`0x14eb3`, `0x14eb5`, `0x14eb9` (already checked, boolean), `0x14eba`. Checked the other
+three's exact usage via raw listing:
+
+- `0x14eb3`, `0x14eb5`: both accessed as 16-bit words (`mvs.w`/`movea.w`), feeding step-
+  count/loop-length arithmetic (`% field == 0`, `<= step_counter` comparisons) — pattern
+  length / loop-count fields, not a mode.
+- `0x14eba`: accessed as a byte, used purely as an **index into a lookup table**
+  (`DAT_401a8ff0 + field*4`, with a `-1` adjustment) — reads as a scale/note-mapping
+  index, not a mode enum.
+
+**None of the four is a 4-way branch or anything resembling SEQUENTIAL/DIRECT START/
+DIRECT JUMP/TEMP JUMP.** This is a real, mechanically-verified negative result:
+**the PTN CHG mode is not read anywhere inside `FUN_4009905c`.** Whatever implements the
+behavioral difference between the four modes must live either in a sibling function in the
+same `0x4009xxxx` module (the other confirmed writers of `0x4056673a`/`0x4056676c` found
+earlier this session — `FUN_40098226`, `FUN_4009867a`, `FUN_4009a3e2`, etc. — none
+decompiled yet), or in a part of the flattened per-pattern record this function simply
+doesn't touch (it's 0x14f00 = 85,760 bytes total; only a handful of offsets near its tail
+have been examined at all).
+
+### Checked the module-cluster's other functions — all transport/reset, not PTN CHG
+   [MEASURED]
+
+Decompiled the three other confirmed writers of `0x4056673a`/`0x4056676c`:
+
+- **`FUN_40098226`** (1108 bytes): initializes/restarts playback of the *current* pattern
+  (`DAT_40566754`) from step 0 — resets all 13 tracks' step counters, timing, etc. Reads
+  the same `0x40b7f4d9`/`0x40b7f4da`-offset fields seen in `FUN_4009905c` (pattern length/
+  scale lookups), nothing new mode-shaped.
+- **`FUN_4009867a`** and **`FUN_4009a3e2`**: both are playback-stop/reset handlers (zero out
+  all per-track state, timing counters, MIDI-related flags). `FUN_4009a3e2` additionally
+  resolves a pattern via the **song/chain table** (`0x4168xxxx` region, same one
+  `FUN_40097e84` used) and calls `FUN_4009a2ae` (a `DAT_40566754` writer) with it — i.e.
+  "stop and rewind to the chain's first pattern."
+- **Found who calls `FUN_40098226`/`FUN_4009a3e2` together: `FUN_400411e8`, confirmed via
+  its own strings (`LIVE REC: QUANTIZED/UNQUANTIZED`, `STEP REC: STANDARD/JUMP`) to be
+  `TransportView`'s own event handler** — i.e. this is the **PLAY/STOP/RECORD button**
+  handler, not a pattern-selection screen at all. Its `event == 0x51` branch is STOP
+  (`FUN_4009a3e2(0,0)`); its PLAY-button path branches on `FUN_400351d4(...)` (plausibly
+  "is chain/song mode active?") between "just restart current pattern"
+  (`FUN_40098226(uVar4)`) and "stop, rewind to chain start, then restart"
+  (`FUN_4009a3e2(0,0); FUN_40098226(0);`).
+
+**None of this is PTN CHG mode logic** — it's genuine, adjacent transport/song-mode
+machinery, confirmed by tracing rather than assumed. Recording it so it isn't re-walked:
+the whole `FUN_40098226`/`FUN_4009867a`/`FUN_4009a3e2`/`FUN_400411e8` cluster is now
+understood and can be set aside.
+
+### Honest state after this session's bottom-up push
+
+Four strong, concrete leads chased to ground this session (the tick engine's own field
+reads, `FUN_40097e84`/`FUN_40097c2c`, the `0x4009xxxx` module cluster, `TransportView`'s
+handler) — all real sequencer/transport code, **none of them the PTN CHG mode check**.
+This doesn't mean the bottom-up approach was wrong (it produced the single biggest
+structural finding of the whole project, the tick engine itself, in the first few steps) —
+it means the specific mode-check site is in a part of this engine not yet reached. Two
+honest possibilities going forward: (a) it's a genuinely small, easy-to-miss branch
+somewhere in the ~80KB of code this cluster spans that just hasn't been the one checked
+yet, or (b) it's reached through a *different* entry point than pattern-select/play/stop —
+e.g. specifically through whatever handles a pattern-select action *while already
+playing* (the actual DIRECT JUMP use case), which may be a still-undiscovered function,
+possibly closer to `case 0xc`'s sibling cases in `switchD_400a1e5e` that weren't
+individually decompiled this session.
+
 ### NEXT for this thread (highest priority)
 
-1. **Closely re-read `FUN_4009905c`'s own precompute/commit boundary logic** — the big
-   boolean expression gating the `DAT_405666e6 == '\x02'` early-trigger branch, and the
-   handful of `*(char/short*)(iVar7 + 0x14eXX)` field reads already visible in the Session
-   5 decompile excerpt (`0x14eb9`, `0x14eb3`, `0x14eb5`, `0x354`, and others not yet
-   individually identified). One of these fields — or one not yet spotted in the same
-   function — is the best remaining candidate for where PTN CHG's 4-valued mode is read.
-   Since hand-reading a 3958-byte decompile is exactly the kind of task Session 4 already
-   showed is error-prone, consider a scripted approach: dump every distinct
-   `iVar7 + 0x14eXX`-style offset referenced in this function with its usage context
-   (compared-against value, branch shape) rather than re-reading the wall of C by eye.
-2. Also worth checking: `FUN_40097724`, `FUN_40097c00`, `FUN_40097c18`, `FUN_400976f6`,
-   `FUN_40098226`, `FUN_4009867a`, `FUN_4009a3e2` — the other members of this same
-   `0x4009xxxx` module cluster, several already known (from the xref search) to also touch
-   `0x4056673a`/`0x4056676c`.
-3. Also worth a look: `switchD_400a1e5e`'s other cases (the containing function of `case
-   0xc`) — a full 1828-byte switch covering many transport/sequencer message types. Not
-   fully read this session beyond confirming `case 0xc` is the pattern-select request path;
-   another case may be the "apply immediately" counterpart if the two-path hypothesis
-   (deferred via `DAT_40566755` vs immediate via a direct `DAT_40566754` write) turns out
-   to be real rather than something the tick engine alone handles.
-4. If a mode-check is found, confirm it reads from the flattened `0x40b6a620 +
+1. **Read `switchD_400a1e5e`'s other ~38 cases** (the function containing `case 0xc`,
+   1828-byte body, already fully decompiled once this session — see the Session 5 "traced
+   the pattern-select request" entry above for the full listing). Only `case 0xc` has been
+   understood in detail so far. Look specifically for a case that's reachable **while
+   already playing** (as opposed to `TransportView`'s PLAY/STOP handling, now ruled out) —
+   that's the actual DIRECT JUMP use case (switching patterns *during* playback), and it's
+   the one scenario this session hasn't yet targeted directly.
+2. `FUN_40097724`, `FUN_40097c00`, `FUN_40097c18`, `FUN_400976f6` — four more members of
+   the `0x4009xxxx` module cluster, referenced from `FUN_4009905c`/`FUN_40098226`, still
+   not individually decompiled.
+3. If a mode-check is found, confirm it reads from the flattened `0x40b6a620 +
    pattern_index*0x14f00`-based table (not the C++ object model) — if so, the PTN CHG mode
    byte's offset within that 0x14f00-byte record is the concrete target, and the earlier
    Sessions 3–4 C++-side search (`PatternSettings`, `patternSettingsStorage_v1_t`) was
@@ -861,8 +921,13 @@ decompiled C, and looking specifically for a compare against a small range (0–
    engine's own compiled/runtime copy) — worth an explicit note for whoever continues,
    since it reframes three sessions of C++-side searching as not wrong, just aimed at a
    different (also real, just not engine-facing) layer of the same data.
-5. This is the most promising lead of the whole project so far — prioritize it over
-   resuming the UI-side `PopupWindow` confirm-flag thread.
+4. This remains the most promising lead of the whole project so far — prioritize it over
+   resuming the UI-side `PopupWindow` confirm-flag thread. But if this specific cluster of
+   functions is fully exhausted without a hit, the next escalation is tooling rather than
+   more manual function-by-function decompiling: e.g. a script that scans every function
+   touching `0x4056673a`–`0x40566900`-ish (the whole per-track/global state block, not just
+   the two addresses checked so far) for a compare against `0`..`3`, surfacing candidates
+   mechanically instead of one xref search at a time.
 
 ### NEXT (superseded UI-side thread, kept for reference — lower priority now)
 

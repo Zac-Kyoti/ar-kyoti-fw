@@ -11,7 +11,7 @@ public class GhidraXrefsTo extends GhidraScript {
         var fm = currentProgram.getFunctionManager();
         var rm = currentProgram.getReferenceManager();
 
-        long[] targets = {0x40098880L};
+        long[] targets = {0x40098226L, 0x4009a3e2L};
         for (long va : targets) {
             var addr = af.getAddress(va);
             println("=== xrefs to 0x" + Long.toHexString(va) + " ===");

@@ -6,7 +6,7 @@ import ghidra.program.model.listing.Function;
 import ghidra.util.task.ConsoleTaskMonitor;
 
 public class GhidraFuncAt extends GhidraScript {
-    static final long ADDR = 0x400a219cL;
+    static final long ADDR = 0x400411e8L;
 
     @Override
     public void run() throws Exception {
