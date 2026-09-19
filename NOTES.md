@@ -232,6 +232,54 @@ firsthand in the FUN_40137440 retraction above. **Further progress on where the 
 *stored* and, especially, where the sequencer *acts* on it needs a different, more
 structural approach than "keep reading FUN_4003fc14 top to bottom."**
 
+### Extended Session 1, continued — found the SequencerStates constructor  [MEASURED]
+
+Followed the one string xref to `"SequencerStates"` (`0x4003535e`, referenced from
+`0x4003535c`) to its containing function at **`0x40035350`** — and this one is not another
+static-init dead end. Raw disassembly confirms it's the real
+**`SequencerStates::SequencerStates()` constructor**:
+
+```asm
+0x4003538a  move.l  0x4019a134, (a2)      ; vtable ptr -> object+0x00
+0x40035394  move.l  0x4019a154, d1
+0x4003539a  move.l  d1, 0x3c(a2)          ; vtable ptr -> object+0x3c
+0x4003539e  move.l  0x4019a144, d0
+0x400353a6  move.l  d0, 0x18(a2)          ; vtable ptr -> object+0x18
+0x400353aa  move.l  0x4019a164, d0
+0x400353b0  move.l  d0, 0x40(a2)          ; vtable ptr -> object+0x40
+0x400353b4  lea.l   0x48(a2), a0          ; then zero/init a region starting at +0x48
+0x400353bc  addi.l  0x7c, d0              ; ... spanning at least another 0x7c bytes
+```
+
+**Inferred**: four distinct vtable pointers at four different offsets in one object,
+sourced from four consecutive 0x10-byte-spaced vtable slots (`0x4019a134/44/54/64`) — the
+classic C++ multiple-inheritance layout (this class implements several interfaces, each
+contributing its own vtable at its own base-subobject offset). Object size is at least
+`0x48 + 0x7c = 0xc4` (196) bytes based on the zero-init span, likely more.
+
+Also present in the same constructor: a call to `FUN_400343bc(a2, 0, d2, 0x64)` — a
+size-0x64 (100-byte) sub-allocation/init, shape matches a generic "register this singleton
+by name" utility (name string ptr `d2` = the same `"SequencerStates"` string) rather than
+being part of the class's own sequencer-state fields.
+
+**Not yet done**: identify what the 4 vtables' virtual methods actually are (would need
+each `0x4019a1xx` table's entries individually decompiled), and what the plain-data fields
+past `0x48` hold. This is real progress on "class layout" but the pattern-switch consuming
+code itself is still not located — that requires either finding `SequencerStates`'
+non-virtual accessor methods (probably called via a `getInstance()`-style function
+elsewhere, not yet located) or finding its virtual methods via the 4 vtables above.
+
+### Where this session leaves off
+
+Two full passes in, the concrete state is: **the feature's UI-facing identity is solid
+(measured)**; **the runtime mechanism is not yet found**, but three dead ends are now
+ruled out and documented (jump-table dispatch, `FUN_40137440` misread, RTTI-string-xref-as-
+shortcut-to-method-bodies) plus one real structural foothold gained (`SequencerStates`'
+constructor and partial object layout). This is consistent with the task brief's own
+framing that this rivals the OT project's multi-session RE scale — no reason yet to expect
+this resolves faster. The `NEXT` list below is deliberately the most concrete, checkable
+starting point for whoever (or whichever session) picks this up next.
+
 ### NEXT (for the next session)
 
 Top-down from the UI (start at the picker, read forward) has hit diminishing returns —
@@ -243,13 +291,20 @@ likely to pay off better next session:
 1. **Try bottom-up instead of top-down**: rather than reading forward from the UI picker,
    look for the *sequencer's* pattern-boundary check directly — by analogy to how the OT
    project originally found its own per-tick engine (`FUN_400a1eea`), not by re-deriving
-   it from a menu handler. Candidate entry points: the `SequencerStates` singleton's
-   accessor (`getInstance()`-style lazy-init function, findable from its one string xref at
-   `0x4003535e`) and its class layout; or search for the actual `Pattern::updateMirror` /
-   `PatternSettings::updateMirror` **function bodies** (not their RTTI registration sites
-   found this session) via vtable-slot tracing from a `Pattern`/`PatternSettings` instance,
-   since the registration code at `0x400a8a70`+ runs at startup and likely constructs a
-   vtable-bearing object nearby.
+   it from a menu handler.
+   - `SequencerStates::SequencerStates()` is now located (`0x40035350`) with 4 vtables at
+     `0x4019a134/0x4019a144/0x4019a154/0x4019a164`. Dump each vtable's function pointers
+     (16 bytes = 4 slots each at minimum, likely more — read forward from each base until
+     the pointers stop landing in the image's code range) and decompile/disassemble each
+     virtual method. One of them is a strong candidate for "apply a pending pattern change
+     at the tick/bar boundary."
+   - Find `SequencerStates`' `getInstance()`-style accessor (a `StaticSingleton` per the
+     RTTI string `StaticSingletonI15SequencerStatesE` — search for xrefs to *that* string,
+     not yet done) to find where in the sequencer tick path it actually gets touched.
+   - Separately: find the real `Pattern::updateMirror` / `PatternSettings::updateMirror`
+     **function bodies** (not their RTTI registration sites found this session) via
+     vtable-slot tracing from a `Pattern`/`PatternSettings` instance's own constructor,
+     the same way `SequencerStates`' constructor was found this session.
 2. Once the pattern-switch commit path is found: identify where it reads the 4-valued mode
    (SEQUENTIAL/DIRECT START/DIRECT JUMP/TEMP JUMP) and how it stays correct — the ordering/
    locking/state-consistency invariants are the actual deliverable this project exists to
