@@ -522,25 +522,85 @@ weren't examined in detail), or `PatternSettings`'s `getMirror()` genuinely can 
 in some states and something else entirely (not the `getMirror()`/`+0x30` pattern that
 misled Session 2) is how its fields actually get touched. Not resolved this session.
 
+## Session 3, continued — traced the picker's full setup block; a real methodology risk
+   found and checked (not confirmed to matter, but worth every future session reading)
+
+Picked option 2 from the prior NEXT list: traced forward from the PTN CHG table-population
+call (`0x40040802`) through to where that case's code exits.
+
+### Picker construction traced through to its exit  [MEASURED]
+
+Past the table `memcpy` and the (now-known-unrelated) `FUN_400b3db2`/SOUND_SETTINGS call,
+the block continues: computes an array element pointer via the same global bounds pair seen
+in Session 1/2 (`0x416c5050`/`0x416c5054`), stores a **literal `3`** into a local (plausibly
+"max index" for a 4-item, 0-based list — consistent with the PTN CHG table's 4 entries,
+*unlike* `FUN_400b3db2`'s 3-valued wrap, which is one more small piece of evidence they're
+unrelated), then calls `FUN_40158ff8` (builds some kind of list/picker model object from
+that array+bounds) and `FUN_40076d18` (binds it to a cached "current pattern accessor",
+loaded earlier into `-0x3c(a6)` from a source not yet traced). The block ends with
+`bra.w 0x40040abc`, jumping to a shared exit point — **no explicit "on-confirm write this
+value" callback pair was found here**, unlike the case-`0x52` block from Session 2
+(`FUN_4003e0d8`/`FUN_4003eee8`). Whatever commits the user's PTN CHG choice is either
+folded generically into the list-picker widget itself (`FUN_40158ff8`/`FUN_40076d18`, not
+yet examined), or happens somewhere this trace hasn't reached.
+
+### Real methodology risk found, checked, and (for this specific path) ruled out
+   [MEASURED]
+
+While tracing backward to pin down the case's true start, found a real, previously
+unaccounted-for hazard: at `0x400404cc`, in a **different, nearby case block**, the
+compiler reassigns the presumed-stable "this" register: `lea.l 0xac(a2), a2` — from that
+point on, `(a2)`-relative reads in *that* block mean `PatternSelectionView + 0xac + offset`,
+not `PatternSelectionView + offset`. This is exactly the kind of thing that could silently
+invalidate offset attributions made anywhere else in this function by assuming `a2` stays
+canonical throughout — a risk not previously considered in Sessions 1–3.
+
+**Checked whether this affects the PTN CHG code specifically**: traced every branch that
+lands at `0x400406a8` (where the PTN CHG case's guarded body begins) — both `0x40040080`
+(`beq.w`) and `0x40040096` (`bra.w`) — and the entire stretch from `0x40040000` through
+`0x400406a8` reads `0x74(a2)`/`0x6c(a2)` consistently with no reassignment in between.
+**For this specific path, `a2` is confirmed canonical.** The `0xac` reassignment lives in
+an unrelated, disjoint case. Not a retraction — a hazard identified, checked, and cleared
+for the region actually relied on so far. **Flagging it anyway for every future session**:
+any *new* offset claim made about a region of this function that hasn't been walked
+backward to its entry this carefully should be treated as unverified until it has.
+
+### Additional corroboration that `+0x74`/SOUND_SETTINGS is generic, not PTN-CHG-specific
+   [MEASURED]
+
+Found a *second*, independent call site with the exact same shape as `FUN_400b3db2`
+(`move.l 0x74(a2),-(a7)` + a literal delta + a call to a small helper — here
+`FUN_400b3ca6` instead of `FUN_400b3db2`) inside a completely different, earlier case
+in the same dispatcher (around `0x40040058`). Two separate, unrelated cases both touching
+`+0x74`/SOUND_SETTINGS with the same "get accessor, apply small delta" shape confirms it's
+a generic, frequently-reused utility field — not something specific to whichever case
+happens to also be building the PTN CHG picker.
+
 ### NEXT (for the next session)
 
-1. Look at what `Project::Project()` (`FUN_400af438`) does in the code *after* the main
-   sub-object construction block (the several zero-fill loops and the final section
-   starting around where `FUN_4016ff30` gets called in a loop) — the mirror-binding pass
-   for `Pattern`/`PatternSettings` may live there rather than inside `Pattern::Pattern()`
-   itself. This wasn't examined past the point excerpted in this NOTES.md.
-2. Alternative approach if (1) doesn't pan out: stop chasing constructors and instead find
-   the PTN CHG **setter** directly — go back to `FUN_4003fc14`'s PTN CHG picker block
-   (around `0x400407ec`–`0x40040834`) and trace forward past `0x40040834` (not yet done
-   carefully) to find the picker's confirm/select callback, the way the case-`0x52` block's
-   callback pair (`FUN_4003e0d8`/`FUN_4003eee8`) was spotted by pattern-matching in Session
-   2 — that callback, once found, must write *somewhere*, and that somewhere is the answer
-   regardless of which C++ sub-object it turns out to be.
+Manual disassembly reading of this one 3764-byte dispatcher function has now cost three
+sessions, produced two corrected false leads (Session 2's `FUN_400b3db2`, this session's
+implicit trust that `+0x74`-adjacent code was PTN-CHG-specific), and one real (if
+ultimately-cleared) methodology hazard (the `a2` reassignment). That is a strong signal to
+change approach rather than keep pushing the same technique further:
+
+1. **Decompile/examine `FUN_40158ff8` and `FUN_40076d18`** (the list-picker
+   constructor and its "bind to current pattern" call, found at the very end of this
+   session's trace) — these are the two most likely places left to find an explicit
+   "write the user's selection back to storage" step, and neither has been looked at yet.
+2. If that doesn't resolve it: build a small **tool** rather than keep reading disassembly
+   by eye — e.g. a script that, given a function's disassembly, tracks which register holds
+   the canonical `this` pointer across the whole function (flagging every `lea.l N(aX),aX`
+   self-reassignment) so future offset claims are checked mechanically instead of trusted
+   from local context alone. This directly addresses the hazard found this session and
+   would make all of Sessions 1–3's remaining raw-disassembly work in this function safer.
 3. Once the storage field is genuinely found: confirm by finding the sequencer's reader of
    the same field/offset, and only then assess what makes the real implementation correct
    (task brief step 3's actual deliverable).
 4. Do not start on OT adaptation (task step 4) — still not close enough to step 3 being
-   solid, three sessions in.
+   solid, three sessions in. This project is tracking the scale the task brief itself
+   predicted ("no reason yet to expect this resolves faster" than the OT's own multi-session
+   effort), and that's an accurate expectation, not a problem to route around.
 
 ### Old, now-superseded NEXT (for reference, from Session 1)
 
