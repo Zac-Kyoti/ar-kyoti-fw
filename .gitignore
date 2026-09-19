@@ -1,0 +1,16 @@
+# --- Elektron copyrighted material: do NOT version or redistribute ---
+# official OS downloaded (.bin/.syx/.zip) + Elektron user manuals
+downloads/
+*.bin
+*.syx
+*.zip
+*.pdf
+
+# analysis results, extracted/patched images, Ghidra project
+out/
+ghidra_project/
+
+# --- Local ---
+.DS_Store
+__pycache__/
+*.pyc
