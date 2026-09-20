@@ -1428,3 +1428,120 @@ against OT's own DIRECT JUMP code without re-deriving it from this log's narrati
 2. Lower priority, unchanged from Session 6: locate TEMP JUMP's revert bookkeeping, and (if
    it ever becomes load-bearing) trace `0x4015716c` to find where the SEQUENTIAL-mode
    generic "value changed" pathway actually writes.
+
+## Session 7, continued — task step 4: compared `MECHANISM.md` against OT's own DIRECT JUMP fix history
+
+**Everything in this section is [INFERRED]**, not measured this session: it is built from a
+report of OT's own already-measured findings (`~/Documents/octatrack-kyoti-fw/NOTES.md`
+Session 70, passes 4–15), not from fresh disassembly of the OT binary. No OT code or
+firmware was touched — this stays within this session's read-only comparison scope, per
+`CLAUDE.md`'s "no OT patches until the AR mechanism is solid" constraint (task step 4 is
+explicitly the comparison itself, not adaptation).
+
+### OT's three fixes, in one line each
+
+1. **Pass 4/5**: `D7 = resumeStep * newLen` (a step-index quotient-seed fix to the
+   per-track `REFILL_TBL` reload). Dynamically proven exact in emulation via fire-timing
+   analysis. Flashed: single switches fixed, but a rapid double-switch (A→B→A) broke.
+2. **Pass 6**: `SCALE_IX` (`DAT_8000663d`) self-heal — root-caused as a genuine, measured
+   **desync bug**: stock derives `SCALE_IX` every step==0 tick from a pattern-blob pointer
+   (`A4`) that a plain manual pattern switch **never refreshes**, so `SCALE_IX` can read the
+   *old* pattern's scale for an unbounded number of ticks after the switch already
+   committed. Fixed via two hooks (one that corrects the value at the commit tick, one that
+   replaces stock's stale-`A4`-sourced write outright on every wrap). Proven exact in
+   emulation (ten consecutive clean wrap cycles). Not independently reflashed — folded into
+   the pass-9 build.
+3. **Pass 8/9**: `G_ABSTICK` (a free-running, never-reset, never-wrapped absolute tick
+   counter) replacing the previous "re-derive resume position from the outgoing pattern's
+   already-wrapped step" model, plus a per-track version of the same fix (each of 8 audio
+   tracks' own `REFILL_TBL` slot recomputed as `G_ABSTICK mod trackLen[t]`, independently,
+   since per-track SCALE overrides mean tracks don't all share the pattern's own length).
+   Both proven exact in emulation against hand-computed ground truth. **Flashed (hardware
+   attempt #5 for this thread): symptom unchanged** — "switched-to patterns are still not
+   in time... and still exhibit the 'restart' behavior, generally after they pass step 16."
+
+Two independently-exact fixes to two different pieces of step-index arithmetic, plus a
+proven-real desync-bug fix, composed together — and the hardware symptom didn't move at
+all. Passes 11–14 chased a `FUN_400a1eea` "track 0 special case" hypothesis to explain
+this and retracted it in pass 15 as a decompiler misreading; pass 15 leaves the real
+mechanism **unfound**, with two prior findings explicitly still standing: (a) the
+`REFILL_TBL` family is very likely irrelevant to audible timing at all (pass 13), and
+(b) the actual defect, seen directly on the trig-grid LEDs, is a **sub-step phase
+misalignment**, not a step-index error (pass 11) — the switched-to pattern can visibly
+land *between* steps, not just on the wrong one.
+
+### Where AR's mechanism has something OT's doesn't
+
+**1. AR has one atomic paired write; OT does not have an equivalent for the analogous
+state.** AR's `FUN_4009905c` writes `DAT_40566754 = DAT_40566755 = DAT_405667dc` together,
+in the same two instructions, with no other code path able to touch either half
+independently (`MECHANISM.md` step 5). OT's `SCALE_IX` bug (fix 2) is a textbook instance
+of the *opposite*: `SCALE_IX` and the actual active-pattern pointer are written by
+genuinely separate stock code, on separate schedules, and drift apart until a hand-added
+hook forces a resync. That the fix for this shape of bug was needed at all confirms OT's
+design has no structural guarantee against it — and nothing in passes 4–15 establishes
+`SCALE_IX` was the *only* piece of derived per-step state built this way. `REFILL_TBL`
+(a per-track quantity, gated by each track's own countdown, `DAT_800065c3`) is a second,
+structurally identical candidate: it is computed and committed on its own per-track
+schedule, not folded into whatever writes the master step/active-pattern state. AR has
+no analogous split — one function, one countdown, one write, for both the pattern pointer
+and the step-resume position together.
+
+**2. AR's countdown is a single, shared, step-boundary-quantized gate; OT's derived state
+appears to update on multiple, independently-timed schedules.** AR's `FUN_4009905c`
+gates *both* halves of the commit (pattern pointer, step-resume position) to land exactly
+on the same step/resolution boundary — by construction, a commit can never land mid-step
+(`MECHANISM.md` step 4–5). OT, by contrast, appears (per fixes 2 and 3 above) to have at
+least three separately-clocked pieces of derived state relevant to a pattern switch: the
+master `DAT_800065b6` step-wrap check, `SCALE_IX`, and each track's own `REFILL_TBL`
+countdown (`DAT_800065c3`) — each written by its own stock code path, at its own
+condition/cadence, not visibly serialized through one shared gate the way AR's two writes
+are. A design with several independently-timed writes contributing to the same logical
+event is structurally exactly what produces a **sub-step phase** artifact rather than a
+clean step-index artifact: if any one of those pieces resolves on a different tick than
+the others, the audible result is neither cleanly "right pattern, right step" nor "right
+pattern, wrong step" but a misalignment inside a step — which is precisely what OT's LED
+test (pass 11) found and precisely the class of defect no purely step-index-arithmetic
+fix (all three OT fixes) could ever touch.
+
+**3. A specific, falsifiable candidate this comparison surfaces: does `DAT_800065c3`
+(or whatever else feeds `DAT_80001904`'s per-track phase, per `refs/octabam`'s
+corroboration) get freshly recomputed/reset at DIRECT JUMP's commit tick, the way AR's
+`DAT_405667e8` is recomputed from the *current* tick position on every incoming
+request** (never accumulated across requests — `MECHANISM.md` step 3)? If OT's per-track
+countdown is instead a running counter that is *not* reset in step with the pattern-pointer
+commit, tracks would keep counting on their pre-switch phase after the switch — a
+mechanism that would produce exactly the reported symptom shape ("not in time when
+switched to," worsening progressively, "generally after they pass step 16" — consistent
+with an un-reset counter's drift becoming audible only once it has accumulated enough
+ticks past the switch to visibly diverge, or wrap using stale phase). This is a narrow,
+directly testable OT-side *measurement* (read whether `DAT_800065c3` and `DAT_80001904`'s
+per-track accumulator inputs get touched at the exact commit tick, or drift onward
+unreset) — not a patch, and not undertaken this session; it belongs to
+`octatrack-kyoti-fw`, not here.
+
+### Status
+
+This closes task step 4 as originally scoped ("read OT's fixes side by side... look
+specifically for where OT's implementation might not have an equivalent to the atomic
+paired write or the fresh-per-request countdown recompute"): two concrete candidate gaps
+were found (no atomic paired write for the `SCALE_IX`/`REFILL_TBL` family; no confirmed
+fresh-per-request recompute for the per-track phase state), both consistent with every
+unretracted OT-side finding to date (the desync-shaped `SCALE_IX` bug, the LED test's
+phase-not-index diagnosis, and three index-exact fixes that didn't move the symptom).
+**None of this has been measured against OT's actual disassembly this session** — it is a
+structural hypothesis built by comparison, offered to `octatrack-kyoti-fw` as a next
+concrete, narrow measurement to run there, not acted on here.
+
+### NEXT for this thread
+
+1. This AR-side investigation's originally-scoped deliverable (task steps 1–4) is now
+   complete: mechanism traced end to end and measured (Sessions 1–6), sanity-checked
+   (Session 7), written up standalone (`MECHANISM.md`), and compared against OT's fix
+   history with concrete candidate gaps identified (this section). Remaining AR-side work
+   (TEMP JUMP's revert bookkeeping, the SEQUENTIAL-mode `0x4015716c` write target) is
+   explicitly lower priority, per Session 6/7 — pick up only if this thread continues.
+2. The natural next step lives in `octatrack-kyoti-fw`, not here: run the falsifiable
+   measurement in point 3 above (does OT's per-track phase/countdown state get reset at
+   DIRECT JUMP's commit tick, same-track DJ-vs-stock comparison as pass 15 itself already
+   recommended). Out of scope for this repo to perform directly.
