@@ -1367,3 +1367,64 @@ likely to pay off better next session:
    stack-var aliasing, calls with no visible args), stop and re-derive from raw
    disassembly rather than reasoning from the pseudo-C — exactly the trap OT's own Session
    70 passes 4–14 fell into before pass 15 retracted them.
+
+## Session 7 (2026-09-20) — sanity-checked the SEQUENTIAL-path claim (partial retraction); wrote the standalone mechanism summary
+
+### The "DAT_40566755 queued unconditionally before the DIRECT block" claim is WRONG as stated — retracted and replaced  [MEASURED]
+
+Per NEXT item 1, disassembled `FUN_4003fc14` from `0x400400a0` (just before the previously-
+captured window) through the SEQUENTIAL-mode fallthrough target and onward
+(`r2 pd @ 0x400400a0`, `@ 0x400401fc`, `@ 0x40040900`). Session 6's inferred guess —
+"plausibly this caller does [a plain DAT_40566755 queue write] before this code segment,
+i.e. always queues the pending slot first" — **does not hold as stated and is retracted.**
+There is no write to `DAT_40566755` (or any `DAT_405667xx` sequencer global) anywhere in
+this function. What's actually there, mechanically confirmed:
+
+- **Unconditional, on every PTN-CHG UI event** (before the mode read at `0x400400d6`):
+  `0x400400ac`–`0x400400c6` calls a handler (`0x400363ac` then `0x4007073c`, the latter via
+  a function pointer in `a3`) that computes a requested-pattern index into `-0x20(a6)` and
+  returns a bool in `d0`. If true: `0x80(a2)` gets a bit set (`or.l d1,0x80(a2)`, `d1 = 1<<d4`)
+  — a **"pending picker value changed" dirty bit on the UI dispatcher object itself**
+  (`a2`), not a sequencer global.
+- **DIRECT (START/JUMP/TEMP) branch** (mode != 0): after `FUN_4003e636` runs, the code
+  unconditionally does `0x88(a2) = -1` (sentinel), `0x90(a2) = 0x8c(a2)` (snapshot
+  new-into-old), `0x84(a2) = 0` — i.e. it **invalidates the generic pending-value
+  bookkeeping**, consistent with "already applied directly, nothing left to commit later."
+- **SEQUENTIAL branch** (mode == 0): `FUN_4003e636` is skipped (confirmed already), and
+  control falls through the outer event-dispatch chain (`0x400401fc` → ... →
+  `0x40040218`'s `bra.w 0x40040920`) to a **generic, PTN-CHG-unaware "value changed?"
+  check**: `tst.l 0x88(a2)` (skip if sentinel/negative), `tst.l 0x80(a2)` (skip if dirty bit
+  clear), `cmp.l 0x8c(a2),0x90(a2)` (skip if old==new), else call a handler twice via
+  `a3 = 0x4015716c` with `(index_ptr, a2+0x8c)` — this reads as a **generic UI-property
+  changed-notify dispatcher shared by every field on this object**, not something
+  PTN-CHG-specific, and not provably the SEQUENTIAL "queue and let it finish naturally"
+  write. Where `0x4015716c` ultimately writes was **not traced this session** — deliberately
+  out of scope for a sanity check, and a real open item if the SEQUENTIAL path ever becomes
+  load-bearing for the task-3 deliverable (it currently isn't: the deliverable is about
+  DIRECT START/JUMP's atomic-commit invariant, which remains fully measured).
+
+**Net effect on the picture**: nothing here changes the DIRECT START/DIRECT JUMP/TEMP JUMP
+mechanism reported in Session 6 (still fully measured, still the actual deliverable).
+The correction is narrower: the *reason* SEQUENTIAL bypasses the countdown/atomic-commit
+mechanism entirely is now precisely characterized (a generic, shared "apply changed picker
+value" pathway, not a same-shaped queue write with a different flag), rather than the
+previous, wrong, mode-agnostic-queue-write guess.
+
+### Standalone mechanism summary written  [status]
+
+Per NEXT item 3, wrote `MECHANISM.md` — a clean, chronology-free writeup of the confirmed
+DIRECT START/DIRECT JUMP/TEMP JUMP request→commit pipeline (mode read → conditional
+dispatch → atomic paired queue write → step-quantized per-tick countdown → atomic commit →
+mode-dependent step-position resume), intended to be read on its own and compared directly
+against OT's own DIRECT JUMP code without re-deriving it from this log's narrative trail.
+
+### NEXT for this thread
+
+1. **Begin task step 4**: read OT's three previously-proven-exact-in-emulation ColdFire
+   register fixes (`~/Documents/octatrack-kyoti-fw`) side by side with `MECHANISM.md` and
+   look specifically for where OT's implementation lacks an equivalent to the atomic paired
+   write or the fresh-per-request countdown recompute. First time this is actually in scope
+   per the task brief's own step ordering.
+2. Lower priority, unchanged from Session 6: locate TEMP JUMP's revert bookkeeping, and (if
+   it ever becomes load-bearing) trace `0x4015716c` to find where the SEQUENTIAL-mode
+   generic "value changed" pathway actually writes.
