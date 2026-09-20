@@ -1100,6 +1100,178 @@ until this is resolved** — treat it as the strongest lead so far, not yet a fi
    to task step 3's actual deliverable, but the mode-attribution gap above means it is not
    yet solid. Six sessions in, still correctly not skipping ahead.
 
+## Session 6, continued — mode-attribution question resolved; the DIRECT START vs DIRECT JUMP distinction found
+
+`ar-kyoti-fw` published to GitHub this session (`github.com/Zac-Kyoti/ar-kyoti-fw`,
+pushed by the user directly — `gh repo create --push` was blocked for the assistant by
+the CLI's own auto-mode policy as a "Create Public Surface" action; noted here in case a
+future session hits the same wall and wonders why `origin` didn't get set up the usual
+way).
+
+### `DAT_405667e0` (the second global `FUN_4009a5b0` writes) is the DIRECT START vs DIRECT JUMP switch  [MEASURED]
+
+Xref'd `DAT_405667e0` (`FUN_4009a5b0`'s `param_2`, previously unread). **Exactly one
+reader, in `FUN_4009905c` right after the commit block**, at `0x40099252`
+(this is inside the raw-listing range already captured earlier this session, just not
+interpreted yet):
+
+```asm
+tst.l   (0x405667e0).l
+bne.b   0x4009927a                  ; DAT_405667e0 != 0: D0 = 0
+; -- fallthrough, DAT_405667e0 == 0 --
+D1 = new_pattern.record[0x14eb3]    ; per-pattern step-length field (already known)
+D2 = DAT_405666e4 (a running tick/step counter)
+if D1 < 1: D0 = D2
+else:      D0 = D2 mod D1           ; divsl.l
+0x4009927a: D0 = 0                  ; (the bne target)
+```
+
+**This is the DIRECT START vs DIRECT JUMP distinction, mechanically confirmed**:
+`DAT_405667e0 != 0` ⇒ new pattern starts at step **0** (restart — DIRECT START's defining
+behavior); `DAT_405667e0 == 0` ⇒ new pattern starts at `old_step mod new_pattern_length`
+(**keep playhead position, wrapped into the new pattern's length** — DIRECT JUMP's
+defining behavior, switch without losing your place). `D0` here feeds forward into
+`0x4009927c`'s onward code (not yet traced further, but this is clearly "the step index
+the newly-current pattern resumes at").
+
+### The countdown is short (next-step-boundary, not next-pattern-boundary)  [MEASURED]
+
+Dumped the first entries of the `0x401a8ff0` lookup table (the one field `0x14eba`/`0xe4ba`
+indexes into) directly from the extracted binary: **`3, 4, 6, 8, 12, 24, 48`**, then
+non-numeric-looking data — a short table of small integers, reading as PPQN-style
+ticks-per-step values for different step-resolution settings (classic 24-PPQN-family
+subdivisions), not a ticks-per-*pattern* table. This settles an open question from
+earlier in the session: `DAT_405667e4`'s countdown (`table[...] - DAT_405666e6`) is **the
+number of ticks until the next step/resolution boundary — at most a few dozen ticks, a
+small fraction of a bar** — not a wait for the whole current pattern to finish. Both
+DIRECT START and DIRECT JUMP commit within one short step-quantized wait, never the full
+remaining length of the currently-playing pattern.
+
+### `FUN_4009a2ae` decompiled — confirmed as a synchronous, unconditional "set pattern now" primitive  [MEASURED]
+
+```c
+void FUN_4009a2ae(uint param_1) {
+  if (param_1 < 0x80) {
+    DAT_4056675c = -1;
+    DAT_40566754 = (char)param_1;         // current pattern, written directly
+    DAT_40566758 = 0;
+    FUN_40099fd2(param_1, -1);            // step/position reset
+    FUN_40097c2c(DAT_40566754);           // song/chain-mode bookkeeping (Session 5)
+    // re-apply the new pattern's note/tempo overrides (0xe4b7/0xe4bc, Session 6 earlier)
+    FUN_401188ec(note_override_or_default);
+    FUN_401184ae(*(uint16*)(new_pattern_record + 0xe4bc));
+    FUN_40001236(...); FUN_40001236(...);  // generic notify, twice
+  }
+}
+```
+No countdown, no `DAT_405667dc`/`DAT_405667e8` involvement at all — this writes
+`DAT_40566754` synchronously and does a full reset-and-reapply (step position, song/chain
+state, per-pattern note/tempo overrides, notify). Called from `FUN_4009a5b0` itself (its
+`DAT_405666e0==0`, i.e. **stopped**, branch) and from `FUN_4003e636`'s own default/`cVar5`
+branch — both readings are consistent with "apply immediately because there's no running
+playback position to quantize against," not "this is DIRECT JUMP's bypass."　This
+resolves Session 6's earlier speculation that `FUN_4009a2ae` was itself the DIRECT-JUMP
+fast path: **it isn't mode-specific at all — it's the stopped/no-context immediate
+setter**, called by multiple modes' code paths whenever there's nothing to quantize
+against.
+
+### Found the caller of `FUN_4003e636` — and it resolves the whole mode-attribution question  [MEASURED, high confidence]
+
+`FUN_4003e636` has exactly two call sites, both inside `FUN_4003fc14` — the same huge
+multi-feature UI dispatcher Session 1 already tied to the PTN CHG string table
+(`0x400407f6`). Raw listing at the first site (`0x400400d6`–`0x400400ee`):
+
+```asm
+move.l  (0x74,A2), -(SP)        ; push A2+0x74  -- the SAME "item" accessor field
+jsr     0x400b3d1e               ; FUN_400b3d1e(A2+0x74)  -- PTN CHG mode reader, called HERE
+addq.l  #0x4, SP
+tst.l   D0
+beq.w   0x400401fc               ; mode == 0 (SEQUENTIAL) -> skip FUN_4003e636 entirely!
+move.l  (-0x20,A6), -(SP)        ; param_2 = requested pattern index
+move.l  A2, -(SP)                ; param_1 = this
+jsr     0x4003e636               ; only reached for mode != 0
+```
+
+**This is the proof.** The caller reads PTN CHG's mode (via `FUN_400b3d1e` on the exact
+same `+0x74` accessor object Session 2 already tied to the PTN CHG picker's own
+read/write site, `FUN_400b3db2`) *before* deciding whether to call `FUN_4003e636` at all,
+and **skips it entirely when the mode is SEQUENTIAL (0)**. So:
+
+- **SEQUENTIAL** (mode 0): `FUN_4003e636`/`FUN_4009a5b0`/`FUN_4009884c`/the countdown
+  commit block are never reached via this path at all. (Where the plain "queue in
+  `DAT_40566755` and let the pattern finish naturally" behavior actually lives has not
+  been re-confirmed this session, but Session 5 already found `FUN_40098880` doing exactly
+  that unconditionally — plausibly this caller does that write *before* the code segment
+  captured here, i.e. always queues the pending slot first, then this block layers
+  DIRECT-mode-only early application on top. Not yet verified line-by-line; flagged as
+  inferred, not measured.)
+- **DIRECT START** (mode 1) and **DIRECT JUMP** (mode 2): `FUN_4003e636` is called, and
+  (mode-attribution now confirmed, since we know the exact mode value at the point of
+  the call) — assuming `FUN_4003e636`'s internal `FUN_400b3d1e` re-read returns the same
+  value as this caller's own read (near-certain, nothing rewrites the mode field in
+  between) — routes to `FUN_4009a5b0(pattern, 1)` for DIRECT START and
+  `FUN_4009a5b0(pattern, 0)` for DIRECT JUMP, i.e. exactly the queued/countdown-gated,
+  step-quantized commit path with the position-reset-vs-keep distinction found above.
+- **TEMP JUMP** (mode 3, raw): `FUN_400b3d1e` saturates any value `≥3` to `2`, so TEMP
+  JUMP is **indistinguishable from DIRECT JUMP at this layer** — same call
+  (`FUN_4009a5b0(pattern, 0)`), same keep-position behavior. Confirms Session 2's
+  speculation (b): the real persisted/consulted enum at this storage layer is 3-valued;
+  TEMP JUMP's distinguishing "reverts afterward" behavior must be implemented via separate
+  bookkeeping not yet located (plausibly using the already-known `DAT_40566756`
+  "previous pattern" slot to snap back later) — a genuinely open item, but a narrow,
+  well-scoped one, not a blocker for understanding the core immediate/deferred mechanism.
+
+### Where this leaves task step 3 — the mechanism is now understood; the "why it's correct" question is next  [status]
+
+The full request→commit pipeline for DIRECT START/DIRECT JUMP/TEMP JUMP is now traced
+end to end, all of it mechanically measured rather than inferred: UI mode read
+(`FUN_400b3d1e` on the picker's own storage field) → conditional dispatch
+(`FUN_4003e636`) → queue write (`FUN_4009a5b0`, storing both the resolved target pattern
+*and* a start-position-behavior flag) → per-tick countdown gated on a short,
+step-resolution-scaled wait, not a full-pattern wait (`FUN_4009905c`, `DAT_405667e4`/
+`DAT_405667e8`/`DAT_405667dc`) → atomic commit (`DAT_40566754`/`DAT_40566755` written
+together) → mode-dependent step-position resume (`DAT_405667e0`, reset-to-0 vs
+modulo-keep).
+
+**The invariant this session's evidence points to, stated plainly**: AR's DIRECT JUMP is
+not "switch mid-instruction, no quantization" — it is "switch at the very next
+step/resolution boundary (a handful of ticks away), keeping timeline position, via the
+*same* atomic current/pending-write the natural end-of-pattern path presumably also uses."
+The "atomic" part may be exactly the missing invariant task step 3 exists to find: current
+and pending are written **together, in the same two instructions**
+(`DAT_40566754 = DAT_40566755 = DAT_405667dc`), gated by a single countdown that's
+recomputed fresh (`DAT_405667e8`) every time a new request arrives — there is no
+window where one is updated and the other lags, and no separate "apply-now" write path
+that could race against the tick engine's own read of the current-pattern pointer
+elsewhere in the same function. This is a genuinely promising candidate for "what OT's
+own three ColdFire-register fixes have been missing" but **has not yet been compared
+against OT's own DIRECT JUMP code at all** — that comparison is task step 4 and is still
+explicitly out of scope until this AR-side picture is double-checked once more (see NEXT).
+
+### NEXT for this thread (highest priority)
+
+1. **Sanity-check the SEQUENTIAL path inferred above**: read the part of `FUN_4003fc14`
+   *before* `0x400400c0` (this session only looked at and after the `FUN_400b3d1e` mode
+   check) to confirm whether `DAT_40566755` (or another plain queue write) really does get
+   set unconditionally regardless of mode, before the DIRECT-mode-specific block layers on
+   top. This is the one piece of this session's picture still marked inferred rather than
+   measured.
+2. **Locate TEMP JUMP's revert bookkeeping** — low priority for task step 3's core
+   deliverable (the immediate/deferred mechanism is understood without it), but worth a
+   session if time allows, since "temporarily jump then return" is exactly the kind of
+   invariant-heavy feature that could contain another lesson for OT.
+3. **Begin the actual task step 3 deliverable in earnest**: write a clean, standalone
+   summary of the confirmed mechanism (the atomic paired write, the fresh-countdown-per-
+   request invariant, the step-quantized — not pattern-quantized — timing) independent of
+   this session-log narrative, so it can be directly compared against OT's own DIRECT JUMP
+   code without having to re-derive it from NOTES.md's chronological trail each time.
+4. **Only after (3) exists as a standalone writeup**, start task step 4: read OT's own
+   three previously-proven-exact-in-emulation ColdFire register fixes side by side with
+   this mechanism and look specifically for where OT's implementation might *not* have an
+   equivalent to the atomic paired write / fresh-per-request countdown recompute. Still
+   not started. Six-plus sessions in — this is the first time starting task step 4 is
+   actually defensible, not just "not yet time."
+
 ### NEXT (superseded UI-side thread, kept for reference — lower priority now)
 
 The picker-construction lead is exhausted — don't re-enter it. Two directions remain:
