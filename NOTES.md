@@ -930,11 +930,11 @@ important caveat for whoever continues: the "exhaustive" field-offset check of
 field reached through a computed/indirect offset (e.g. a small lookup table keyed by
 track or event type) would not have shown up in that grep, and hasn't been ruled out.
 
-### NEXT for this thread (highest priority)
+### Old, now-superseded NEXT (for reference, from Session 5)
 
-Every concrete lead this session's bottom-up push surfaced organically has now been
-checked (see immediately above). Continuing needs either fresh leads or better tooling,
-not more ad-hoc decompiling of whatever function was mentioned last:
+Every concrete lead Session 5's bottom-up push surfaced organically had, at that point,
+been checked. Item 1 below (the offset-scanning tool) is what Session 6 built and used —
+see the new Session 6 section and its own NEXT list for the current state.
 
 1. **Build the offset-scanning tool flagged as a caveat above**, rather than continue by
    hand: a script that, for a given function, lists every memory access whose base is
@@ -961,6 +961,144 @@ not more ad-hoc decompiling of whatever function was mentioned last:
    different (also real, just not engine-facing) layer of the same data.
 5. This remains the most promising lead of the whole project so far — prioritize it over
    resuming the UI-side `PopupWindow` confirm-flag thread.
+
+## Session 6 (2026-09-20) — built a mechanical table-access scanner; found the boundary-commit mechanism and its request dispatcher
+
+### Built `tools/ghidra/GhidraFindTableAccess.java`  [DONE]
+
+Per the caveat closing Session 5, built the flagged tool: for a given function, it walks
+the decompiled high P-code, and for every `LOAD`/`STORE` op does a bounded backward slice
+through the address varnode's def-chain (through `INT_ADD`/`INT_MULT`/`PTRADD`/`PTRSUB`/
+`COPY`/`CAST`/`MULTIEQUAL`/`INDIRECT`/sign-zero-extend), flagging any op whose chain
+touches the flattened table's base constant (`0x40b6a620`), its per-record stride
+(`0x14f00`), or a `LOAD` of one of the pattern-index globals (`DAT_40566754/55/56`). This
+catches indirect/computed table accesses a literal-offset grep over decompiled C text
+cannot — the exact gap Session 5 flagged.
+
+**Validated against a known-positive control** (`FUN_4009905c` itself): found all 4
+previously-known literal offsets (`0x14eb3/b5/b9/ba`) *plus* several genuinely new ones
+the manual grep had missed entirely (see below) — 45 matching ops total, confirming the
+tool actually works rather than silently missing everything.
+
+**Known limitation, recorded rather than glossed over**: the tool's reported
+`offsets=[...]` list is every constant seen anywhere in the bounded backward slice, not
+necessarily all part of the same literal address expression — a `MULTIEQUAL` (phi) node
+merges values from multiple predecessor blocks, so a downstream use can pick up a constant
+that only applies on a control-flow path that particular use doesn't actually take. Every
+offset this session treats as meaningful was cross-checked against Ghidra's raw
+instruction listing before being trusted — **the tool is a lead-generator, not a
+ground-truth source by itself.**
+
+### Ran it against the whole surviving lead list — clean, mechanically-verified negatives  [MEASURED]
+
+- **`switchD_400a1e5e`'s true containing function (`FUN_400a1518`, all ~38 cases)**: zero
+  matches. The entire request-dispatch switch — not just `case 0xc`, every case — never
+  touches the flattened table or the pattern-index globals, directly or indirectly. This
+  mechanically closes Session 5 NEXT-list item 3: the PTN CHG mode is **not** consulted
+  inline in the dispatch path.
+- **`FUN_40098880`** (the pattern-select request handler, `case 0xc`'s callee): zero
+  matches. Confirms it really is just the raw index-validate-and-store
+  (`if (idx<0x80) DAT_40566755=idx`) Session 5 already found.
+- **`FUN_4009867a`, `FUN_400b3980`, `FUN_400411e8`, `FUN_40097e84`, `FUN_40097c2c`**: all
+  zero matches, mechanically confirming Session 5's by-eye rulings.
+- **The four still-unexamined module-cluster members from Session 5 NEXT item 2**
+  (`FUN_40097724`, `FUN_40097c00`, `FUN_40097c18`, `FUN_400976f6`): all zero matches.
+  Ruled out as PTN CHG candidates without needing individual manual decompiles — closes
+  Session 5 NEXT item 2 outright.
+
+### New record fields found this way, raw-listing-confirmed — not the mode, but real new territory  [MEASURED]
+
+- **`FUN_40098226`** touches a previously-unknown **per-track sub-array** inside the
+  flattened record: base offset `0x2c5`/`0x2c7`, stride `0x395`, 13 entries (raw listing
+  confirms the loop bound `0x2e91 = 13 * 0x395`, matching the already-known 13-track
+  count). Reads as byte/string-copy plumbing (label characters, a per-track override byte
+  with a shared-default fallback) — not a mode field.
+- **`FUN_4009a3e2`** touches two more new fields, both confirmed by decompiling their sole
+  consumers: **record+`0xe4b7`** (signed byte; negative ⇒ fall back to a global default
+  note — `FUN_401188ec` sets that default when `0 ≤ value < 0x80` — a per-pattern MIDI
+  note override) and **record+`0xe4bc`** (uint16, fed straight into `FUN_401184ae`, which
+  clamps it to `0xe10`–`36000` — the exact same BPM×10 range as the tempo setter — a
+  **per-pattern tempo override**). Neither is 4-valued; both ruled out as PTN CHG
+  specifically, but now concretely characterized rather than left as unexplained offsets.
+
+### Found the boundary-commit mechanism inside `FUN_4009905c`  [MEASURED — the mechanism itself; mode-attribution still open, see below]
+
+Raw-listing read of `0x400990e0`–`0x40099280` (the region the new tool's hits pointed at)
+turns out to be the tick engine's **pattern-switch commit block**, structured as a
+countdown:
+
+- `DAT_405667e4` is a **countdown**: when a "recompute" flag (`DAT_405667e8`) is set, it's
+  re-derived as `lookup_table[current_pattern.record[0xe4ba]] - DAT_405666e6` (steps
+  remaining until the current pattern's own boundary, via the same `0x401a8ff0` lookup
+  table already known from field `0x14eba`'s "scale/resolution index" role). Every tick,
+  if nonzero it's decremented; **only when it reaches exactly 0** does the block below run.
+- The commit itself, verbatim: `DAT_40566756 = DAT_40566754` (previous = old current),
+  then **`DAT_40566754 = DAT_40566755 = DAT_405667dc`** (both current *and* pending are set
+  from a third global, `DAT_405667dc` — "resolved next pattern index"). This is the literal
+  pattern-switch.
+
+So the state machine is: some request path writes `DAT_405667dc` (what to switch to) and
+sets `DAT_405667e8` (recompute-the-countdown), and the switch actually happens only when
+`DAT_405667e4` counts down to the current pattern's own natural boundary. This is almost
+certainly the mechanism behind SEQUENTIAL/TEMP-JUMP-style deferred switching.
+
+**Found the two writers of `DAT_405667dc`** (via `GhidraXrefsTo.java` — the only other
+reference is `FUN_4009905c` itself, reading it at the commit line):
+
+- **`FUN_4009884c(param_1)`**: `if (DAT_405666e0==1) { DAT_405667e8=1; DAT_405667dc=param_1; DAT_4056682c=1; }` — queues a pattern change for the next boundary, only while `DAT_405666e0` (a playback-state byte) `==1`.
+- **`FUN_4009a5b0(param_1, param_2)`**: same shape but two params — if `DAT_405666e0==1`, queues (also writing `DAT_405667e0=param_2`); if `DAT_405666e0==0` (stopped), instead does an **immediate** song/chain-table lookup and writes `DAT_40566754` directly, no countdown at all — i.e. this one function alone has both a queued path and a bypass path, selected by *playback state*, not (as far as decompiled so far) by PTN CHG's own mode.
+
+**Found their one shared caller: `FUN_4003e636(param_1, param_2)`** (`param_2` = requested
+pattern index, `< 0x80` guarded) — a genuine dispatcher between three different ways of
+applying a pattern change:
+
+1. If `*(byte*)(*(int*)(param_1+0x70) + 0x44)` (`cVar5`, read via the trivial one-line
+   getter `FUN_400351d4`) is true **and** a separate byte at `param_1+0xc6` is nonzero:
+   clears that byte and calls `FUN_4009884c(param_2)` directly — the queued path above.
+2. Otherwise, after a block of view/selection bookkeeping (`FUN_400b6502/9088/6532/674a`,
+   `FUN_4009a9e0`/`FUN_4009aac8`), it calls `FUN_400b3d1e(uVar7)` — a helper that reads a
+   value via a vtable call (`(**(code**)(*obj+0x28))(obj)`) and clamps its `+0x30` field to
+   `{0,1,2}` — and branches three ways on the result: `==1` ⇒ `FUN_4009a5b0(param_2, 1)`;
+   `==2` ⇒ `FUN_4009a5b0(param_2, 0)`; otherwise (default/no context) ⇒ **`FUN_4009a2ae(param_2)`
+   called directly** — skipping the queued mechanism and both request functions entirely,
+   an **immediate** write with no countdown wait at all.
+
+**Honest confidence marker — this is the most important open question right now.**
+`FUN_4009a2ae` writing `DAT_40566754` directly, with no countdown gate, is exactly the
+*shape* of a DIRECT-JUMP-style bypass. But the two things selecting between the three
+paths here — `cVar5` (a one-byte getter off a sub-object at `param_1+0x70`) and
+`FUN_400b3d1e`'s `{0,1,2}` classification (which reads like a chain/song-context type, a
+*different*, already-known AR feature, not obviously PTN CHG's own 4-valued enum) — have
+**not yet been confirmed** to be reading PTN CHG's SEQUENTIAL/DIRECT START/DIRECT
+JUMP/TEMP JUMP setting specifically. It's entirely plausible this branching is actually
+about song/chain-context rather than PTN CHG at all, and the real PTN CHG mode read
+happens somewhere still unfound — inside whichever function sets `param_1+0xc6`, or a
+still-unidentified caller upstream of `FUN_4003e636` itself. **Do not treat
+`FUN_4009a2ae`/`FUN_4009884c`/`FUN_4009a5b0` as "the DIRECT JUMP mechanism, confirmed"
+until this is resolved** — treat it as the strongest lead so far, not yet a finding.
+
+### NEXT for this thread (highest priority)
+
+1. Find every caller of `FUN_4003e636` — almost certainly (a) `PatternSelectionView`'s
+   confirm/OK handler, (b) a grid-button pattern-select-while-playing handler, or both.
+   Confirming which UI entry point(s) reach it, and under what circumstances
+   `param_1+0xc6` gets set, is the fastest path to resolving the mode-attribution question
+   above.
+2. Independently: find where PTN CHG's own 4-entry mode setting is actually *stored* (the
+   field the `PTN: SEQUENTIAL/DIRECT START/DIRECT JUMP/TEMP JUMP` picker writes to, from
+   Session 1/3's UI-side work) — then check whether that storage location is read anywhere
+   in `FUN_4003e636`'s call chain (`cVar5`'s sub-object at `param_1+0x70`, or upstream of
+   `param_1+0xc6`'s write). This directly answers the open confidence-marker question
+   above and is probably the single highest-value next action.
+3. Decompile **`FUN_4009a2ae`** itself (referenced several times this session as "the
+   immediate-write path" but never actually read) — confirm it really does write
+   `DAT_40566754` with no countdown/gate, and check whether it also writes
+   `DAT_40566755`/`DAT_40566756` or resets anything else a true instant jump would need to
+   reset (step counters, mirrors, etc.) — this is task step 3's "what makes it correct"
+   question starting to become answerable.
+4. Do not start on OT adaptation (task step 4). This is the closest the project has come
+   to task step 3's actual deliverable, but the mode-attribution gap above means it is not
+   yet solid. Six sessions in, still correctly not skipping ahead.
 
 ### NEXT (superseded UI-side thread, kept for reference — lower priority now)
 
