@@ -1634,3 +1634,78 @@ global written inside stock's own per-track loop, then rebuild all of it in one 
 commit instead of hooking individual repairs. Note AR's dividend is its **master step
 counter** (`0x405666e4`), not an absolute tick — OT's invented `G_ABSTICK` may be
 unnecessary; OT's own master `STEP` (`0x800065b6`) is the direct analogue.
+
+## Session 9 (2026-09-22) — AR research consolidated; the OT port landed, and it revealed AR's architecture is the same as OT's
+
+Written from the OT side (`octatrack-kyoti-fw` Session 79 cont.20–31), folded back here at
+the user's direction so this repo carries the complete record rather than only the AR half.
+
+### `AR_DIRECT_JUMP.md` (new, canonical, identical in both repos)
+
+Supersedes `MECHANISM.md` as the single document of record. Contains AR's request path,
+countdown and commit (both 13-track rebuild loops, full eight-array inventory), the OT
+equivalent, a full **AR ↔ OT mapping table**, what the port turned out to be, the 16-bit
+bound, AR-side open items, and the methodology hazards. `MECHANISM.md` remains accurate as
+corrected in Session 8 but is now the narrower document.
+
+### The finding that reframes this whole repo's purpose
+
+The premise of this project was that AR does something OT does not, which OT should learn.
+**That premise is wrong.** OT already contains AR's exact commit architecture: a per-track
+rebuild loop (`0x400a4884`–`0x400a49e2`, MIDI twin from `0x400a49e6`) that divides a master
+position by each track's own ticks-per-step and wraps it to that track's own length — the
+same computation as AR's `0x4009927c`–`0x400992d2`, on the same kind of contiguous per-track
+arrays, driven by the same kind of ticks-per-step table.
+
+It was invisible for the entire project because it sits in a **1586-byte region Ghidra never
+decoded** (`0x400a4568`–`0x400a4b9a`). OT's DIRECT JUMP never worked not because the machinery
+was missing, but because its position input (`0x80006628`, a start offset in master steps) is
+0 at a natural boundary and nothing ever set it otherwise.
+
+So the port was: **supply the offset the existing code already expects.** One 6-byte hook.
+Measured result — 16 tracks, mixed scales and lengths, armed commit:
+
+| track | scale | len | tps | STEP | derivation |
+|-------|-------|-----|-----|------|------------|
+| 0, 3–15 | 2 | 16 | 6 | 10 | 156/6 = 26 steps, 26 mod 16 |
+| 1 | 0 (2x) | 16 | 3 | 4 | 156/3 = 52 steps, 52 mod 16 |
+| 2 | 2 | 12 | 6 | 2 | 26 mod 12 |
+
+Both switch directions 16/16.
+
+### Where AR IS genuinely better — and it is not what Sessions 1–7 thought
+
+Not the atomic write, and not the fresh-per-request countdown, though both are real. It is
+**what AR divides**.
+
+AR's dividend is `masterStep mod patternLen` — already bounded. OT's rebuild is fed
+`D7 = LEN_TBL[masterScale] * 0x80006628`, and to express "resume where the timeline is" the OT
+port must put an *absolute* tick count there. But OT stores the first divide's quotient with
+`move.w` (`0x400a4916`) and reads it back **sign-extended** (`mvs.w`, `0x400a4950`), so that
+quotient must fit a signed word. Measured by poking the counter: `G_ABSTICK = 40002` gives
+`NEXT_STEP = -14` and `STEP = 242` on a 16-step pattern.
+
+Bound ≈ 32767 master steps ≈ **68 minutes of continuous transport** at 120 BPM/16ths. AR never
+hits this because it commits from its own per-tick function (`FUN_4009905c`) and can therefore
+divide a bounded quantity; OT reuses a pattern-boundary body whose offset input is unbounded.
+
+**That is the one architectural lesson from AR that OT has NOT yet absorbed**, and it is now
+the main open problem on the OT side: reducing the absolute counter before it reaches the
+loop, with a modulus that preserves every per-track position while keeping the fastest track's
+quotient inside a signed word. Those two constraints pull against each other and no
+construction covering arbitrary length/scale combinations has been found.
+
+### Corrections to earlier sessions in this repo, carried forward
+
+- Session 8 already retracted "AR's commit writes one variable". Standing.
+- Sessions 1–7's "candidate invariant" (atomic write + fresh countdown) is real but
+  **secondary**. The primary invariant is *rewrite the whole per-track state vector from one
+  master position, never patch it* — and the practical lesson for OT turned out to be the
+  boundedness of the dividend, which none of Sessions 1–7 identified.
+
+### Still open here (unchanged, still low priority)
+
+1. TEMP JUMP's revert bookkeeping — inferred to reuse `DAT_40566756`, never checked.
+2. SEQUENTIAL's own commit path (`0x4015716c` write target).
+3. Semantics of the `0` / `-1` per-track arrays (`0x4056672d`, `0x405667ba`). OT's port does
+   not need them; the symmetry is unexplained.
