@@ -1545,3 +1545,92 @@ concrete, narrow measurement to run there, not acted on here.
    measurement in point 3 above (does OT's per-track phase/countdown state get reset at
    DIRECT JUMP's commit tick, same-track DJ-vs-stock comparison as pass 15 itself already
    recommended). Out of scope for this repo to perform directly.
+
+## Session 8 (2026-09-21) — MAJOR RETRACTION + the finding the OT port actually needed: the commit rebuilds ALL per-track state
+
+Prompted from the OT side. The OT DIRECT JUMP build had just been flashed and produced a
+severe regression (frozen transport, audio reduced to clicks) with DIRECT JUMP toggled
+**both ON and OFF**, after six successive per-variable "repair" fixes each of which exposed
+the next. The user's question was direct: *is AR's DIRECT JUMP actually fully understood?*
+Answer: **no.** Sessions 1–7 traced the commit as far as one master scalar and stopped at
+`0x4009927c` with the note that `D0` "feeds forward into `0x4009927c`'s onward code (not yet
+traced further)". That untraced region is the entire substance of the commit.
+
+The user also supplied a hardware fact that reframed the question: **AR has per-track
+sequence lengths** (12 drum tracks + a 13th FX track, each independently settable). So the
+hypothesis that AR's simplicity came from a simpler data model was wrong before it was
+tested.
+
+### Retracted
+
+- **"AR's commit writes one variable" / "both are properties of a single function with a
+  single short countdown" is incomplete to the point of being misleading.** The paired
+  pattern write and the `new_step` modulo are the *prologue*. The payload is a rebuild of
+  eight parallel per-track arrays.
+- The Session 7 framing that offered OT "no atomic paired write for the
+  `SCALE_IX`/`REFILL_TBL` family" as the gap was aiming at the wrong level. The gap is not
+  that OT fails to write those atomically — it is that OT *adjusts* them at all instead of
+  overwriting them wholesale.
+
+### Measured this session (all from `out/fun4009905c_listing.txt`, cross-checked against raw bytes of `out/section_3_MAIN_OS.bin`)
+
+`FUN_4009905c`'s commit, after `DAT_40566754 = DAT_40566755 = target` and
+`new_step = masterStep mod patternLen`, runs two unconditional loops over **13 tracks**:
+
+1. `0x400991de`–`0x40099202` — rebuild per-track countdown reloads:
+   `*(0x405667c7 + t) = ticksPerStep[ *(track_t + 0x2c7) ] - 1`
+2. `0x4009927c`–`0x400992d2` — rebuild per-track phase, five arrays per track:
+   `D3 = perTrackScaleMode ? *(track_t + 0x2c5) : patternLen` ; `D2 = new_step mod D3` ;
+   then `0x40566720[t] = D2`, `0x4056673a[t] = D2-1`, `0x4056672d[t] = 0`,
+   `0x405667ba[t] = -1`, `0x40566830[t] = D2`.
+
+Loop bound `0x2e91` = **exactly** 13 × track stride `0x395` (917) — arithmetic, not
+inference. Eight per-track arrays total (see `MECHANISM.md`'s table), each exactly 13
+entries, **tiling contiguously**, with four boundaries independently confirmed by the
+function's own `cmpa.l` sentinels (`0x40566720`, `0x40566747`, `0x40566782`, `0x405667d4`).
+The array geometry is self-proving; nothing here is assumed.
+
+`0x14eb9` is AR's **per-track scale mode flag** — the direct analogue of OT's `SCALE_MODE`
+at pattern `+0x8e55`. AR carries OT's per-track scale complexity as well as its per-track
+lengths. Its correctness is therefore a property of *how it commits*, not of what it has to
+manage.
+
+A second, independently-gated commit site (`0x40099370` onward, gated on `0x405667d6` and
+`0x40566748 == 1`) rebuilds `0x405667c7[t]` with byte-identical logic at
+`0x400993e8`–`0x40099404`. Two commit paths, one discipline.
+
+### Methodology hazard found (new)
+
+**Ghidra's printed operand order for ColdFire `divsl.l` is unreliable.** It renders
+`4c412800` (`0x40099274`) and `4c437802` (`0x400992b6`) with `D2` leading in both, although
+`D2` is the quotient/dividend in the first and the remainder in the second. Read the
+extension word instead: **field(14:12) = dividend and quotient destination, field(2:0) =
+remainder.** Both sites were settled from the encoding and then cross-checked against which
+register demonstrably holds the dividend on entry (`D2` ← `mvz.w 0x405666e4` at
+`0x40099262`; `D7` ← `move.l D0,D7` at `0x400992b2`), so the conclusion does not rest on the
+disassembler at all. Same family as the already-known objdump-garbles-`mvs`/`mvz`/`divsl`
+trap; worth carrying to the OT repo, which relies on both tools.
+
+### The invariant, restated (supersedes Session 7's two-property version)
+
+**Rewrite the whole per-track state vector from one master position; never patch it.** No
+per-track value survives a commit, so "stale per-track variable" is not a failure mode that
+exists on AR. The atomic paired write and the fresh-per-request countdown recompute are
+real and still hold, but they are supporting details, not the mechanism.
+
+### NEXT for this thread
+
+AR-side understanding of DIRECT JUMP is now genuinely complete for porting purposes. The
+remaining AR questions are unchanged and still low priority (TEMP JUMP's revert
+bookkeeping; SEQUENTIAL's `0x4015716c` write target). One new optional item: identify the
+semantics of the `0`/`-1` per-track arrays (`0x4056672d`, `0x405667ba`) — the OT port needs
+their *analogues* identified on OT, but not necessarily their AR meanings.
+
+The work moves to `octatrack-kyoti-fw`, and the well-posed question there is now:
+**enumerate OT's complete per-track state vector** (AR has eight arrays; OT has five known:
+`STEP_IN_PAT 0x800064f0`, `TRK_SCALE_IX 0x8000663e`, `REFILL_TBL 0x800064d0`,
+`CNTDN_TBL 0x800065c3`, plus MIDI counterparts `0x80006646`/`0x80006508`) by finding every
+global written inside stock's own per-track loop, then rebuild all of it in one loop at
+commit instead of hooking individual repairs. Note AR's dividend is its **master step
+counter** (`0x405666e4`), not an absolute tick — OT's invented `G_ABSTICK` may be
+unnecessary; OT's own master `STEP` (`0x800065b6`) is the direct analogue.

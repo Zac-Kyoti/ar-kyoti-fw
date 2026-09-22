@@ -102,6 +102,81 @@ This is the DIRECT START vs DIRECT JUMP distinction, mechanically confirmed at t
 site: DIRECT START always resumes at step 0; DIRECT JUMP/TEMP JUMP keep timeline position,
 wrapped (modulo) into the new pattern's own length.
 
+`new_step` is **one master scalar**. It is not the end of the commit — see step 6, which
+Session 7 missed entirely and which is the part that matters for the OT port.
+
+### 6. Per-track state rebuild — the real payload of the commit
+
+AR has **13 tracks** (12 drum + 1 FX), each with an independent sequence length and step
+resolution. Per-track sequencer state lives in a set of **parallel 13-entry byte arrays**.
+The commit does not preserve, adjust, or repair them. It **recomputes every one of them
+from scratch**, from the single master `new_step` plus each track's own length, in one
+unconditional 13-iteration loop at `0x4009927c`–`0x400992d2`:
+
+```
+A6 = 0x40566720   A5 = 0x4056673a   A4 = 0x4056672d   A3 = 0x405667ba   A2 = 0x40566830
+A1 = pattern record base ; D1 = 0
+loop:                                        ; 13 iterations
+    D3 = D5 ? *(A1 + 0x2c5)                  ; per-track scale mode -> THIS track's length
+            : *(A0 + 0x14eb3)                ; else pattern-wide length (word)
+    D7 = D0                                  ; D0 = master new_step, reloaded every pass
+    D2 = D7 mod D3                           ; divsl.l D3,D2:D7  -- remainder
+    A1 += 0x395                              ; next track record
+    *(A6)++ = D2                             ; per-track STEP
+    *(A5)++ = D2 - 1
+    *(A4)++ = 0
+    *(A3)++ = -1
+    *(A2)++ = D2
+until ++D1 == 13
+```
+
+A second loop just before it (`0x400991de`–`0x40099202`, same 13×`0x395` walk) rebuilds the
+per-track countdown-reload array from each track's own resolution index:
+
+```
+*(0x405667c7 + t) = ticksPerStep[ *(track_t + 0x2c7) ] - 1
+```
+
+Complete inventory of per-track arrays written by one commit — **all 13 entries each,
+tiling contiguously, every boundary independently confirmed by the code's own `cmpa.l`
+sentinels** (`0x40566720`, `0x40566747`, `0x40566782`, `0x405667d4`):
+
+| array | width | value written |
+|-------|-------|---------------|
+| `0x405666ec` | long | `1` |
+| `0x40566720` | byte | `new_step mod trackLen` |
+| `0x4056672d` | byte | `0` |
+| `0x4056673a` | byte | `(new_step mod trackLen) - 1` |
+| `0x40566775` | byte | per-track resolution index (or the pattern-wide one) |
+| `0x405667ba` | byte | `-1` |
+| `0x405667c7` | byte | `ticksPerStep[trackRes] - 1` |
+| `0x40566830` | byte | `new_step mod trackLen` |
+
+Plus master scalars: `0x405666e4 = new_step` (word), `0x405666e8 = new_step - 1`,
+`0x405666e6` = master ticks-per-step − 1, `0x40566774` = master resolution index,
+`0x405667d4 = -1` (word), and the paired pattern write of step 5.
+
+Per-pattern fields used: `0x14eb3` pattern-wide length (word), `0x14eb9` **per-track scale
+mode flag**, `0x14eba` pattern-wide resolution index. Per-track record fields: `+0x2c5`
+length (byte), `+0x2c7` resolution index (byte). Track stride `0x395` (917); the loop bound
+`0x2e91` = exactly 13 × `0x395`. Pattern record stride `0x14f00`, base `0x40b6a620`.
+
+`0x14eb9` is the direct analogue of OT's `SCALE_MODE` (pattern `+0x8e55`): **AR has OT's
+per-track scale complexity too.** AR's correctness therefore is not a consequence of a
+simpler data model — it is a consequence of *how* it commits.
+
+The same rebuild discipline appears at a second, independently-timed commit site
+(`0x40099370` onward, gated on `0x405667d6` and `0x40566748 == 1`), which reconstructs
+`0x405667c7[t]` with byte-identical logic (`0x400993e8`–`0x40099404`). Two separate commit
+paths, one shared rule: *rewrite the whole per-track vector, never patch it.*
+
+**Methodology note:** Ghidra's printed operand order for ColdFire `divsl.l` is unreliable
+(it renders `4c412800` and `4c437802` with `D2` first in both, though `D2` is the
+quotient/dividend in one and the remainder in the other). Read the extension word:
+field(14:12) = dividend **and** quotient destination, field(2:0) = remainder. Both sites
+above were settled this way and cross-checked against which register holds the dividend on
+entry — same family of hazard as objdump garbling `mvs`/`mvz`/`divsl` into `.short`.
+
 ## TEMP JUMP
 
 `FUN_400b3d1e`'s mode read **saturates any value ≥ 3 to 2**. TEMP JUMP is therefore
@@ -130,8 +205,20 @@ out the earlier, wrong guess that it shared a queue write with the DIRECT path).
 
 ## The candidate invariant, stated for comparison against OT
 
-Two properties, together, are what this document's evidence points to as "what makes AR's
-DIRECT JUMP correct":
+Three properties. The third was found only after step 6 above was traced, and it is the one
+that explains OT's stalled effort.
+
+0. **Total per-track state rebuild, not repair.** Every per-track sequencer variable is
+   recomputed from scratch at commit, from one master `new_step` and each track's own
+   length/resolution, in a single unconditional loop over all 13 tracks. No per-track value
+   survives a commit; nothing is adjusted in place; there is no dependence on accumulated
+   history, and therefore no such thing as a "stale" per-track variable. OT's effort has
+   instead been *repairing* individual per-track globals one at a time as each staleness
+   revealed itself (`STEP_IN_PAT[t]`, `TRK_SCALE_IX[t]`, `CNTDN_TBL`, `REFILL_TBL`,
+   `BAR_CTR`, table-arm cadence) — six fixes, each exposing the next. AR shows the whole
+   category is avoidable.
+
+Supporting the above:
 
 1. **Atomic paired write**: the current-pattern pointer and its paired/pending slot are
    written together, in the same two instructions, with no window where one lags the
