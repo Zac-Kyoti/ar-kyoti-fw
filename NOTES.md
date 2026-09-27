@@ -1788,3 +1788,14 @@ AR side: nothing blocks the port. Open items are listed in AR_SEQUENCER_ENGINE.m
 work moves to the OT repo: measure OT's tick-ISR phase order and its analogues of the
 first-fire mask / fire countdown, then build the DJ commit AR's way (§6 of the engine doc) —
 never through the boundary body.
+
+## Session 11 (2026-09-27) — AR_DJ_QUIRKS.md: the record of AR DIRECT JUMP behaviours the OT port will eventually deviate from
+
+New file `AR_DJ_QUIRKS.md` (mirrored in the OT repo's `reference/`). Item 1 is a hardware
+observation by the user on the AR MKI: NORMAL scale mode, two tracks of 16 and 7 steps,
+certain cadences of DIRECT JUMP switches leave the 16-step track exactly half a step off
+the grid — stock AR. Mechanism not localised (the DJ commit zeroes every tick phase, so it
+arises later; candidates listed in the file as hypotheses). Items 2 and 3 are the
+scheduler dedupe duplicate and the master-scale lurch already derived from the decompile.
+Rule: the OT port reaches AR-exact behaviour first; deviations come one at a time, each
+recorded there with the AR behaviour kept reconstructible.
