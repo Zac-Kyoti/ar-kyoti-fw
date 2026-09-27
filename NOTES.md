@@ -1709,3 +1709,82 @@ construction covering arbitrary length/scale combinations has been found.
 2. SEQUENTIAL's own commit path (`0x4015716c` write target).
 3. Semantics of the `0` / `-1` per-track arrays (`0x4056672d`, `0x405667ba`). OT's port does
    not need them; the symmetry is unexplained.
+
+## Session 10 (2026-09-26) — the OT "gold" DIRECT JUMP was never gold; the whole AR engine decompiled in answer
+
+### Why
+
+The OT user re-flashed `GOLD_S87` and reproduced step-fractional playback at **1x, NORMAL
+mode, no scales, a plain 16-step ↔ 7-step pattern switch** — the case every V5.x gate had
+been measured *against* as the correct baseline. Decision on the OT side: restart the port
+from AR's whole sequencer/timing engine, not from the commit loops alone. This session is
+that decompilation. Record of the result: **`AR_SEQUENCER_ENGINE.md`** (canonical here,
+mirrored into `octatrack-kyoti-fw/reference/`), plus `AR_DIRECT_JUMP.md` §10.
+
+### Method
+
+- `tools/ghidra/GhidraSeqCensus.java` — every instruction touching a list of globals
+  (data refs AND bare scalar/cursor operands, so register-indirect loops are not missed),
+  then callers/callees of every function that touched one. Built-in table = the sequencer
+  globals; script args `name=0xaddr` override it. Two runs: `out/ghidra/seq_census_session10.txt`
+  (sequencer state), `timing_census_session10.txt` (timebase, shared region), plus
+  `misc_census_session10.txt`.
+- `tools/ghidra/GhidraDecompArgs.java` — decompile + raw listing for any list of entry
+  addresses; `out/ghidra/seq_decomp_session10.txt` (43 functions, 7720 lines),
+  `ui_dispatch_session10.txt`. **Gotcha:** Ghidra prints multi-line `println` output as ONE
+  `INFO` line followed by raw continuation lines — a `grep` on the script-name prefix silently
+  drops every decompiled body. Filter by stripping the prefix and dropping other modules'
+  `INFO/WARN` lines instead.
+- Vector table: the image starts at `0x40000400`, the RAM vector table at `0x40000000` is
+  built at boot; a regex over `move.l #handler,D0 ; move.l D0,(0x400000xx)` pairs recovers
+  every installed handler (12 installs; the three sequencer ones are in `FUN_40097fee`).
+
+### Findings (all measured; details and addresses in AR_SEQUENCER_ENGINE.md)
+
+1. **`FUN_4009905c` is the sequencer tick ISR** (`rte`, INTC0 src 57 level 2). It is a forced
+   interrupt: the clock-edge ISR `FUN_40097838` (src 44, level 5) ends with
+   `INTFRCH |= 0x2000000`; src 44 itself is forced from the MIDI realtime parser
+   `FUN_40080f54` on each `0xF8` when the sync source (`FUN_4009c460` = highest bit of
+   `0x4024be38`) is 1. Under internal clock the tick ISR's tail writes a deadline mailbox
+   `0x80006838` that no CPU code reads — the clock edge comes from the DSP-shared side.
+2. **Time unit**: 1 tick = 1/24 quarter (6 ticks per 1x 16th), kept as `0xdbba0` = 900 000
+   sub-units; `now = 0x40566570`. The ISR also runs on quarter-tick slices (`0x36ee8`); every
+   musical phase is gated on `0x40566578 == 0`.
+3. **The ISR order is the mechanism**: B advance now → D pattern-change commits → E per-track
+   trig scheduling (one step of lookahead: event computed at the first tick of a step's
+   window, fire time = last tick + microtiming) → F per-track advance → G master advance
+   (phase 2: pick next pattern; phase 0: wrap-change) → H fire-countdown landings → I clock
+   counters → J timer tail.
+4. **The DIRECT JUMP commit (D2) carries no sub-step remainder.** D1 sets `countdown =
+   tps_master − master_tick_phase` (next master boundary); D2 rebuilds all 13 tracks
+   synchronously (`step = new_step mod len_t`, tick 0, `cntdn = tps_t − 1`, fire countdown
+   −1, first-fire mask all set) and writes `master_tick_phase = tps_master − 1` so the master
+   step body runs at the end of the same tick. E then fires every track's `new_step`
+   immediately (`ahead = 1`) and re-seeds `tick_in_step = tps_t − 1`, F advances, and from
+   the next tick on the grid is exact by construction.
+5. **The (target step, remainder) pair `0x405667f4/f6` of AR_DIRECT_JUMP §9 is the
+   PAUSE / SONG-POSITION mechanism**, written by `FUN_4009a618` (from `FUN_4009a7e8` ← MIDI
+   `0xF2`) and `FUN_4009a142` (pause), consumed by transport start `FUN_40098226`
+   (`0x40098358`) and the src-44 ISR's deferred landing (`0x40097910`). Not by the jump. So
+   OT V5.7–V5.11's `dj_mrem` seed was built on a mis-attribution — withdrawn in §10.
+6. **AR's wrap-change path IS OT's boundary body**: `T = cycleStart × tps_master`; per track
+   `q = ceil(T/tps_t)` (`0x40566784`), remainder (`0x4056679e`), hold bit when remainder > 0
+   (`0x405667b8`, one skipped advance = OT dead end 1), catch-up `cntdn = tps_t −
+   tps_master_old` (`0x405667c7`), fire countdown `max(1, tps_master_old + 1 − tps_t)`
+   (`0x405667ba`, landing in H). AR never routes a jump through it. OT's port routed *every*
+   jump through it (Hook H's `0x80006628` offset into the boundary body) — that is the
+   architectural mistake, independent of any later hook.
+7. **Neither machine fires trigs from the CPU.** AR posts `(fire time 0x8000aa5c, record
+   0x4273c990, slot mask 0x8000681c)` per track and slot into the DSP-shared region, with
+   microtiming and swing folded into the fire time and p-locks resolved to a delta list at
+   schedule time (`FUN_400989d0`, `FUN_400988fc`). Same shape as OT's `DAT_80001904` table.
+8. UI dispatcher `FUN_4003e636`: mode 1 → `FUN_4009a5b0(pat, 1)`, mode 2 → `(pat, 0)`,
+   otherwise immediate `FUN_4009a2ae` when stopped; a `view+0xc6` path uses `FUN_4009884c`
+   (queued, semantics untraced — open item).
+
+### NEXT
+
+AR side: nothing blocks the port. Open items are listed in AR_SEQUENCER_ENGINE.md §8. The
+work moves to the OT repo: measure OT's tick-ISR phase order and its analogues of the
+first-fire mask / fire countdown, then build the DJ commit AR's way (§6 of the engine doc) —
+never through the boundary body.
