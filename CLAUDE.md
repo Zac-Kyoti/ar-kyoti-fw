@@ -3,7 +3,9 @@
 Reverse-engineering the Analog Rytm firmware to find its own instant/in-time
 pattern-switch mechanism ("DIRECT JUMP" — Elektron's own name for it, confirmed in the
 firmware strings), with the eventual goal of understanding what makes it correct well
-enough to inform `~/Documents/octatrack-kyoti-fw`'s own long-stuck DIRECT JUMP effort.
+enough to inform `~/Documents/octatrack-kyoti-fw`'s own DIRECT JUMP effort. **That goal is
+met (2026-09-27):** the OT shipped DIRECT JUMP V7 — built on the AR-exact port (V6.4) this repo
+made possible, then deliberately improved on AR (clock-locked landing; `AR_DJ_QUIRKS.md`).
 
 **Read `NOTES.md` first** — jump to the newest `## Session N`, it's chronological.
 

@@ -1799,3 +1799,33 @@ arises later; candidates listed in the file as hypotheses). Items 2 and 3 are th
 scheduler dedupe duplicate and the master-scale lurch already derived from the decompile.
 Rule: the OT port reaches AR-exact behaviour first; deviations come one at a time, each
 recorded there with the AR behaviour kept reconstructible.
+
+## Session 12 (2026-09-27) — the OT port is DONE: V6.4 AR-exact confirmed, V7 shipped; AR's quirks explained
+
+No AR-side reverse engineering this session — this entry records what the AR research
+produced on the OT, and one fact it establishes about the AR itself.
+
+**The port.** OT DIRECT JUMP **V6.4** implements AR's commit exactly (AR_SEQUENCER_ENGINE.md
+§6) through the OT's own stock landing (`0x80006687` path). Hardware-confirmed 2026-09-27:
+instant, persistent, and AR-exact — including AR's faults. It stays buildable in the OT repo
+as the **OT↔AR parity build**.
+
+**What AR does wrong, measured on its exact port.** AR's D2 computes `new_step = master_step mod
+patLen` (`0x40099274`) from the **outgoing** pattern's master counter, which wraps with that
+pattern. After a 7-step cycle the counter no longer says where a 16-step pattern would be, so
+the new pattern lands a whole number of steps off the clock. The OT's reference-lock oracle
+(a never-switched run vs the switched run) measured V6.4 as perfect whole-step time shifts
+(+2/−2/+4 steps, 100% of ticks at one offset, no fractional part) — the author's hardware
+observation on the AR (quirk 1), explained. The same rule quantises the landing to the
+outgoing master's grid (quirk 3, the lurch) and leaves the outgoing pattern's due event
+alive beside the landing's first fire (quirk 2).
+
+**V7 (shipped, hardware-confirmed 2026-09-27)** keeps AR's total synchronous rebuild — the
+MECHANISM.md invariant held — and changes only its input: every track lands where it would be
+had the new pattern played since START, from an absolute clock counter; the outgoing pattern's
+pending events are cancelled (the first incoming trig wins); the landing waits for a tick
+where every incoming track is at a step start. All three AR_DJ_QUIRKS items are marked fixed
+on OT. Details: OT `NOTES.md` Session 108, OT `reference/handoffs/DIRECTJUMP_V7_DESIGN.md`.
+
+**For a future AR mod** (not started, not scoped): the same one-input change would apply to
+AR's D2 — AR has the same landing structure and the same outgoing-counter dependency.

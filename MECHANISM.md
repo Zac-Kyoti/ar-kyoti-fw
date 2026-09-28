@@ -6,6 +6,12 @@ is **measured** (directly observed in Ghidra/radare2 disassembly of the extracte
 See `NOTES.md` Sessions 1–7 for the full derivation trail and raw evidence; this document
 states only the conclusion, for direct comparison against OT's own DIRECT JUMP code.
 
+> **2026-09-27:** the OT port is done. V6.4 reproduced this mechanism exactly on the OT
+> (hardware-confirmed); V7 shipped with one deliberate change — the landing position comes
+> from an absolute clock counter instead of the outgoing pattern's master step, which is
+> where AR's own shifts come from (`AR_DJ_QUIRKS.md`). The invariant below held: V7 is still
+> a total, synchronous rebuild on one tick; only its input changed.
+
 ## Scope
 
 PTN CHG (pattern change) on the Analog Rytm has four modes, persisted as a small integer
