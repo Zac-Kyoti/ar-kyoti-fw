@@ -6,7 +6,7 @@ is **measured** (directly observed in Ghidra/radare2 disassembly of the extracte
 See `NOTES.md` Sessions 1–7 for the full derivation trail and raw evidence; this document
 states only the conclusion, for direct comparison against OT's own DIRECT JUMP code.
 
-> **2026-09-27:** the OT port is done. V6.4 reproduced this mechanism exactly on the OT
+> **2026-09-27:** the OT implementation is done. V6.4 reproduced this mechanism's behaviour exactly on the OT
 > (hardware-confirmed); V7 shipped with one deliberate change — the landing position comes
 > from an absolute clock counter instead of the outgoing pattern's master step, which is
 > where AR's own shifts come from (`AR_DJ_QUIRKS.md`). The invariant below held: V7 is still
@@ -109,7 +109,7 @@ site: DIRECT START always resumes at step 0; DIRECT JUMP/TEMP JUMP keep timeline
 wrapped (modulo) into the new pattern's own length.
 
 `new_step` is **one master scalar**. It is not the end of the commit — see step 6, which
-Session 7 missed entirely and which is the part that matters for the OT port.
+Session 7 missed entirely and which is the part that matters for the OT implementation.
 
 ### 6. Per-track state rebuild — the real payload of the commit
 

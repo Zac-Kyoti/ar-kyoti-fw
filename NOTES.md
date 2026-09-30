@@ -1829,3 +1829,19 @@ on OT. Details: OT `NOTES.md` Session 108, OT `reference/handoffs/DIRECTJUMP_V7_
 
 **For a future AR mod** (not started, not scoped): the same one-input change would apply to
 AR's D2 — AR has the same landing structure and the same outgoing-counter dependency.
+
+## Session 13 (2026-09-30) — "ported" corrected: the OT reproduced the AR's behaviour, not its code
+
+A legal concern from the user about publishing the OT's DIRECT JUMP build tools: was AR code
+ported into the OT? **No — measured** in the OT repo (its NOTES Session 118 continued (2)):
+both firmwares are ColdFire, and the assembled OT V7 and V6.4 caves share no code run longer
+than 8 bytes with this repo's MAIN OS 1.73 — `lea -60(sp),sp; movem.l d0-a6,(sp)`, a generic
+register save — plus the toast text `DIRECT JUMP`. What went from here to the OT is how the
+AR's DIRECT JUMP behaves, learned by decompiling it and reproduced in original code that
+drives the Octatrack's own stock re-landing routine.
+
+So "ported" was the wrong word. Reworded in this repo's live files (18 edits in 6 files: the
+three AR docs, CLAUDE.md, MECHANISM.md, tools/ghidra/GhidraSeqCensus.java): "ported AR's
+commit" -> "reproduced the AR's behaviour", "the OT port" -> "the OT implementation". The
+three docs stay identical to their mirrors in `octatrack-kyoti-fw/reference/`. This log
+keeps its original wording.
